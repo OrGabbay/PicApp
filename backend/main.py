@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from routers import generations
 import models
 from database import engine
 
@@ -6,6 +7,8 @@ from database import engine
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="PicApp API")
+
+app.include_router(generations.router, prefix="/api/v1", tags=["Generations"])
 
 @app.get("/")
 def read_root():
