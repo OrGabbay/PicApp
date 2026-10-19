@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import { enhancePrompt, createGeneration } from "../../src/lib/api";
+import { useState, useEffect } from "react";
+import { enhancePrompt, createGeneration, getGenerationHistory } from "../../src/lib/api";
+import { GenerationItem } from "../../src/types/api";
 
 export default function StudioPage() {
   const [prompt, setPrompt] = useState("");
@@ -10,8 +11,27 @@ export default function StudioPage() {
   const [loadingGenerate, setLoadingGenerate] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  
+  // New state for history gallery
+  const [history, setHistory] = useState<GenerationItem[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(true);
 
-  // Calls Claude via backend to enrich the prompt
+  // Fetch history when the component mounts
+  useEffect(() => {
+    const fetchHistory = async () => {
+      try {
+        setLoadingHistory(true);
+        const data = await getGenerationHistory();
+        setHistory(data.items);
+      } catch (err) {
+        console.error("Failed to load history:", err);
+      } finally {
+        setLoadingHistory(false);
+      }
+    };
+    fetchHistory();
+  }, []);
+
   const handleEnhance = async () => {
     if (!prompt.trim()) return;
     try {
@@ -20,13 +40,12 @@ export default function StudioPage() {
       const res = await enhancePrompt({ prompt });
       setPrompt(res.enhanced_prompt);
     } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to enhance prompt");
+      setError(err instanceof Error ? err.message : "Failed to enhance prompt");
     } finally {
       setLoadingEnhance(false);
     }
   };
 
-  // Calls the backend generation endpoint
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
     try {
@@ -37,15 +56,18 @@ export default function StudioPage() {
         aspect_ratio: aspectRatio,
       });
       setImageUrl(res.image_url);
+      
+      // Instantly prepend the new image to the history gallery
+      setHistory((prev) => [res, ...prev]);
     } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to generate image");
+      setError(err instanceof Error ? err.message : "Failed to generate image");
     } finally {
       setLoadingGenerate(false);
     }
   };
 
   return (
-    <div className="max-w-4xl mx-auto p-8 space-y-6">
+    <div className="max-w-5xl mx-auto p-8 space-y-6">
       <h1 className="text-3xl font-bold">Prompt Studio</h1>
 
       {error && (
@@ -102,7 +124,7 @@ export default function StudioPage() {
         </div>
       </div>
 
-      {/* Preview Output / Loading Skeleton */}
+      {/* Preview Output */}
       <div className="mt-8 border border-dashed rounded-xl h-80 flex items-center justify-center bg-zinc-50 dark:bg-zinc-950 overflow-hidden">
         {loadingGenerate ? (
           <div className="flex flex-col items-center space-y-2 text-zinc-500">
@@ -110,15 +132,37 @@ export default function StudioPage() {
             <span className="text-sm">Synthesizing image...</span>
           </div>
         ) : imageUrl ? (
-          <img
-            src={imageUrl}
-            alt="Generated output"
-            className="w-full h-full object-contain"
-          />
+          <img src={imageUrl} alt="Generated output" className="w-full h-full object-contain" />
         ) : (
-          <p className="text-zinc-400 text-sm">
-            Enter a prompt and click Generate to see the result.
-          </p>
+          <p className="text-zinc-400 text-sm">Enter a prompt and click Generate to see the result.</p>
+        )}
+      </div>
+
+      {/* History Gallery */}
+      <div className="pt-12 border-t mt-12">
+        <h2 className="text-xl font-semibold mb-6">Your Previous Generations</h2>
+        {loadingHistory ? (
+          <div className="text-zinc-500 text-sm">Loading history...</div>
+        ) : history.length > 0 ? (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            {history.map((item) => (
+              <div key={item.id} className="relative group rounded-lg overflow-hidden border aspect-square bg-zinc-100 dark:bg-zinc-900">
+                <img 
+                  src={item.image_url} 
+                  alt={item.original_prompt} 
+                  className="w-full h-full object-cover"
+                />
+                {/* Hover Overlay displaying the prompt */}
+                <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex flex-col justify-end p-3">
+                  <p className="text-xs text-white line-clamp-4">
+                    {item.enhanced_prompt || item.original_prompt}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-zinc-400 text-sm">{"You haven't generated any images yet."}</p>
         )}
       </div>
     </div>

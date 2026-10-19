@@ -1,10 +1,21 @@
 # backend/routers/generations.py
 from fastapi import APIRouter, Depends, HTTPException, status
 import schemas
+import models
 from anthropic import Anthropic
+from sqlalchemy.orm import Session
+from database import SessionLocal
 import os
 
 router = APIRouter()
+# Dependency to inject the database session into endpoints
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 # Mock authentication dependency: 
