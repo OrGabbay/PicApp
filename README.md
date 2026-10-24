@@ -46,8 +46,11 @@ pip install -r requirements.txt
 
 # Configure environment
 cp .env.example .env
-# Edit .env: put your API key in ANTHROPIC_API_KEY (or leave it empty to use free mode).
-# The DATABASE_URL default matches docker-compose.yml.
+# Edit .env:
+#  - JWT_SECRET_KEY (required): generate one with
+#      python -c "import secrets; print(secrets.token_urlsafe(48))"
+#  - ANTHROPIC_API_KEY: your API key, or leave it empty to use free mode
+#  - DATABASE_URL: the default matches docker-compose.yml
 
 # Start the API server
 uvicorn main:app --reload
@@ -125,7 +128,8 @@ Frontend renders the image and shows a popup if key_warning is set
 ```
 PicApp/
 ├── backend/
-│   ├── main.py                 # FastAPI app, CORS, router registration
+│   ├── main.py                 # FastAPI app, CORS, router registration, /auth endpoints
+│   ├── security.py             # Password hashing (argon2) and JWT tokens
 │   ├── database.py             # Engine, session, get_db dependency
 │   ├── models.py               # SQLAlchemy ORM models (User, Prompt, Generation, Favorite)
 │   ├── schemas.py              # Pydantic request/response schemas
@@ -141,7 +145,11 @@ PicApp/
 │   │   ├── studio/page.tsx     # Image generation UI (main feature)
 │   │   ├── gallery/page.tsx    # All generations with lightbox
 │   │   ├── profile/page.tsx    # User stats
-│   │   └── settings/page.tsx   # API key management
+│   │   ├── settings/page.tsx   # API key management
+│   │   ├── login/, register/   # Auth forms
+│   │   ├── account/            # Logged-in user page
+│   │   └── api/auth/           # Next.js routes that proxy login/register and set the token cookie
+│   ├── components/ui/          # shadcn UI components (Button, Card, Input, Label)
 │   ├── src/
 │   │   ├── components/
 │   │   │   ├── Navbar.tsx      # Sticky nav with active states
@@ -159,6 +167,9 @@ PicApp/
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `GET` | `/` | — | Health check |
+| `POST` | `/auth/register` | — | Create an account (email + password) |
+| `POST` | `/auth/login` | — | Log in, returns a JWT access token (30 min) |
+| `GET` | `/auth/me` | Bearer token | Current user |
 | `POST` | `/api/v1/providers/detect` | — | Detect which provider a key belongs to |
 | `POST` | `/api/v1/prompts/enhance` | optional key | Enhance a prompt |
 | `POST` | `/api/v1/generations/create` | optional key | Generate an image |
@@ -167,7 +178,7 @@ PicApp/
 | `POST` | `/api/v1/generations/{id}/favorite` | — | Toggle favorite |
 | `DELETE` | `/api/v1/generations/{id}` | — | Delete a generation |
 
-> **Note:** Authentication is currently mocked (all requests treated as `user_id=1`). A real JWT system will be added in a future phase.
+> **Note:** Login/registration works, but the `/api/v1` generation endpoints are not connected to it yet — they still treat every request as the demo user (`user_id=1`), so all users share one gallery.
 
 ---
 
