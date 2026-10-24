@@ -11,7 +11,7 @@ class UserCreate(BaseModel):
 class UserOut(BaseModel):
     id: int
     email: EmailStr
-    created_at: datetime
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -24,15 +24,29 @@ class TokenResponse(BaseModel):
 # --- Prompt & Generation Schemas ---
 class EnhancePromptIn(BaseModel):
     prompt: str
+    style: Optional[str] = None
+    provider: Optional[str] = None
 
 class EnhancePromptOut(BaseModel):
     original_prompt: str
     enhanced_prompt: str
+    engine: str = "Preset"
+    provider: Optional[str] = None
+    error: Optional[str] = None
 
-class GenerationCreate(BaseModel):
-    original_prompt: str
-    enhanced_prompt: Optional[str] = None
+class DetectProviderIn(BaseModel):
+    key: str
+
+class DetectProviderOut(BaseModel):
+    provider: str
+    name: str
+
+class GenerateImageRequest(BaseModel):
+    """Request body for POST /generations/create."""
+    prompt: str
     aspect_ratio: Optional[str] = "1:1"
+    style: Optional[str] = None
+    provider: Optional[str] = None
 
 class GenerationOut(BaseModel):
     id: int
@@ -40,11 +54,21 @@ class GenerationOut(BaseModel):
     image_url: str
     original_prompt: str
     enhanced_prompt: Optional[str] = None
+    engine: Optional[str] = None
     created_at: datetime
     is_favorite: bool = False
+    key_warning: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+class FavoriteToggleOut(BaseModel):
+    generation_id: int
+    is_favorite: bool
+
+class StatsOut(BaseModel):
+    total_generations: int
+    total_favorites: int
 
 class PaginatedGenerationsOut(BaseModel):
     items: List[GenerationOut]

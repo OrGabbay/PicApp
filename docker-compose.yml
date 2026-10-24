@@ -1,16 +1,23 @@
-version: '3.8'
 services:
-  postgres-db: #[cite: 5]
-    image: postgres:15 #
-    container_name: picapp_postgres #
+  postgres-db:
+    image: postgres:15
+    container_name: picapp_postgres
     environment:
+      # Local development credentials; must match DATABASE_URL in backend/.env
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
       POSTGRES_DB: picapp_db
     ports:
-      - "5432:5432" #
+      # Bound to localhost only so the database is not reachable from your network
+      - "127.0.0.1:5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data #
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d picapp_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
 volumes:
   postgres_data:

@@ -10,8 +10,21 @@ __pycache__/
 .venv/
 venv/
 env/
+.pytest_cache/
+
+# Generated images saved by the backend (user content, recreated at runtime)
+backend/static/
+
+# Environment files (keep the .example templates)
 .env
+.env.*
+!.env*.example
+
+# Logs
+*.log
 
 # OS / Editor
 .DS_Store
+Thumbs.db
 .vscode/
+.idea/
