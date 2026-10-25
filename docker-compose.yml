@@ -1,0 +1,24 @@
+services:
+  postgres-db:
+    image: postgres:15
+    container_name: picapp_postgres
+    environment:
+      # Defaults are for local development only. To change the password, create a .env file
+      # next to this one with POSTGRES_PASSWORD=... and update DATABASE_URL in backend/.env
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: picapp_db
+    ports:
+      # Bound to localhost only so the database is not reachable from your network
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d picapp_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

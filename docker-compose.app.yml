@@ -1,0 +1,68 @@
+# The complete app (database, backend, frontend) for running PicApp on your own computer.
+# Start it with run.bat (Windows) or ./run.sh (macOS / Linux), which also creates app.env.
+# For development, use docker-compose.yml (database only) and the steps in README.md instead.
+name: picapp-app
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Missing POSTGRES_PASSWORD - start PicApp with the run script}
+      POSTGRES_DB: picapp_db
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    # No published port: only the backend can reach the database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d picapp_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    env_file: app.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/picapp_db
+      PUBLIC_BACKEND_URL: http://localhost:8000
+      APP_URL: http://localhost:3000
+      CORS_ORIGINS: http://localhost:3000
+    volumes:
+      - images:/app/static/generations
+    ports:
+      # Bound to localhost only, so the app is not reachable from your network
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        PUBLIC_BACKEND_URL: http://localhost:8000
+    environment:
+      BACKEND_URL: http://backend:8000
+      PUBLIC_BACKEND_URL: http://localhost:8000
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  images:
