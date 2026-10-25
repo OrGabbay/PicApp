@@ -43,7 +43,11 @@ export async function POST(request: Request) {
 
     result.cookies.set("access_token", data.access_token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      // Secure whenever the page was loaded over HTTPS (directly or via a proxy); plain HTTP
+      // is only expected on localhost
+      secure:
+        new URL(request.url).protocol === "https:" ||
+        request.headers.get("x-forwarded-proto") === "https",
       sameSite: "lax",
       path: "/",
       maxAge: 30 * 60,

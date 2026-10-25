@@ -19,6 +19,11 @@ backend/static/
 .env
 .env.*
 !.env*.example
+# Settings of the run script (holds the generated database password and secrets)
+app.env
+
+# Backups made with "run backup"
+backups/
 
 # Logs
 *.log

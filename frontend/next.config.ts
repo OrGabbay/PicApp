@@ -5,6 +5,9 @@ const isDev = process.env.NODE_ENV === "development";
 // Public address of the backend: saved images (DALL-E / Imagen) are loaded from it directly
 const publicBackendUrl = (process.env.PUBLIC_BACKEND_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const imageSources = `https://image.pollinations.ai ${publicBackendUrl}`;
+// HTTPS-only headers are left out when the app is served over plain HTTP (e.g. run locally
+// on http://localhost), where they would break loading images from the backend
+const servedOverHttps = publicBackendUrl.startsWith("https://");
 
 // Content Security Policy without nonces (nonces would force every page to render
 // dynamically and don't work with partial prerendering). It still blocks scripts from
@@ -21,7 +24,7 @@ const csp = [
   "base-uri 'self'",
   "form-action 'self'",
   "frame-ancestors 'none'",
-  ...(isDev ? [] : ["upgrade-insecure-requests"]),
+  ...(servedOverHttps ? ["upgrade-insecure-requests"] : []),
 ].join("; ");
 
 const securityHeaders = [
@@ -30,8 +33,7 @@ const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=()" },
-  // Only meaningful over HTTPS, so only in production builds
-  ...(isDev ? [] : [{ key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains" }]),
+  ...(servedOverHttps ? [{ key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains" }] : []),
 ];
 
 const nextConfig: NextConfig = {

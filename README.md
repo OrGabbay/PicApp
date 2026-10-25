@@ -6,7 +6,40 @@ A full-stack web app for AI-powered image generation. Type a prompt → an AI mo
 
 ---
 
-## Quick Start
+## Run PicApp
+
+Everything runs on your own computer, in Docker. The only thing to install is **[Docker Desktop](https://www.docker.com/products/docker-desktop/)**.
+
+1. Download this repository (**Code → Download ZIP** on GitHub, then unzip it, or `git clone` it).
+2. Start PicApp:
+   - **Windows:** double-click **`run.bat`**
+   - **macOS / Linux:** open a terminal in the folder and run **`./run.sh`**
+3. PicApp opens in your browser at **http://localhost:3000**.
+
+The first start builds the app and takes a few minutes; later starts take seconds. On the first start the script creates **`app.env`** with new random secrets for your installation and offers to save a free Pollinations token. Keep `app.env`: it holds your database password.
+
+PicApp keeps running in the background (also after a reboot, as long as Docker Desktop runs). Other commands — on Windows use `run.bat <command>` (or `.\run.ps1 <command>`), on macOS / Linux `./run.sh <command>`:
+
+| Command | What it does |
+|---------|--------------|
+| `start` | Starts PicApp (the default). Run it again after downloading a new version: it rebuilds what changed. |
+| `stop` | Stops PicApp. Accounts and images are kept. |
+| `logs` | Shows the app log, including password reset links when no email server is set up. |
+| `backup` | Saves the database and all images to a new folder in `backups/`. |
+| `restore <folder>` | Puts a backup back, e.g. `run.bat restore backups\2026-10-25_21-00-00`. Replaces the current accounts and images. |
+
+**Settings** live in `app.env` (edit it, then run `start` again):
+
+- `POLLINATIONS_TOKEN` — strongly recommended. Without it the free engine makes only about one image every 45 seconds. Create a free account at [enter.pollinations.ai](https://enter.pollinations.ai) and paste the token here.
+- `SMTP_*` — the email server used for **Forgot your password?** emails (`app.env` has a Gmail example). Without it, the reset link is written to the log instead: run `logs` and open the link shown there.
+
+**Privacy:** PicApp is only reachable from this computer (it listens on `localhost`, not on your network). Your accounts and images are stored in Docker volumes on this machine. Deleting your account (**Profile → Delete my account**) removes it together with all your images.
+
+---
+
+## Development Setup
+
+To work on the code, run the backend and frontend directly (with hot reload) instead of `run.bat` / `run.sh`. Stop PicApp first if it is running, since both use ports 3000 and 8000.
 
 ### Prerequisites
 | Tool | Purpose |
@@ -205,6 +238,10 @@ PicApp/
 | `POST` | `/auth/register` | — | Create an account (email + password) |
 | `POST` | `/auth/login` | — | Log in, returns a JWT access token (30 min) |
 | `GET` | `/auth/me` | Bearer token | Current user |
+| `POST` | `/auth/logout` | Bearer token | Revoke the current token |
+| `POST` | `/auth/password-reset/request` | — | Email a password reset link (same answer whether or not the account exists) |
+| `POST` | `/auth/password-reset/confirm` | — | Set a new password with a reset token (single use, valid 30 min) |
+| `POST` | `/auth/delete-account` | Bearer token + password | Delete the account with all its images |
 | `POST` | `/api/v1/providers/detect` | — | Detect which provider a key belongs to |
 | `POST` | `/api/v1/prompts/enhance` | optional key | Enhance a prompt |
 | `POST` | `/api/v1/generations/create` | optional token + key | Generate an image (saved to the gallery only when logged in) |
@@ -224,16 +261,17 @@ PicApp/
 
 - **Passwords**: hashed with argon2; must be 8–128 characters with at least one letter and one number.
 - **Sessions**: JWT in an httpOnly cookie (30 min), revoked on the server at logout. The browser never handles the token — `frontend/app/api/backend/[...path]` attaches it.
-- **Rate limits** (`backend/rate_limit.py`, in memory): 5 wrong passwords per account per 15 min, 20 login attempts per IP per 5 min, 5 sign-ups per IP per hour, 5 images/min for guests and 15/min per user.
+- **Rate limits** (`backend/rate_limit.py`, in memory): 5 wrong passwords per account and IP per 15 min (50 per account from any IP per hour), 20 login attempts per IP per 5 min, 5 sign-ups per IP per hour, 3 reset emails per account per hour, 5 images/min for guests and 15/min per user.
+- **Password reset**: single-use links valid for 30 minutes; only a SHA-256 hash of the token is stored.
 - **Access control**: users can only see, favorite and delete their own images; API keys are ignored for guests.
 - **CSRF**: state-changing requests through Next.js must come from the app's own origin.
-- **Headers**: Content-Security-Policy, X-Frame-Options, nosniff, Referrer-Policy and Permissions-Policy on the frontend (`next.config.ts`); HSTS in production builds.
+- **Headers**: Content-Security-Policy, X-Frame-Options, nosniff, Referrer-Policy and Permissions-Policy on the frontend (`next.config.ts`); HSTS when served over HTTPS.
 
-**Before deploying anywhere other than your own machine:**
+**Before deploying to a server** (not needed with `run.bat` / `run.sh`, which keep everything on `localhost`):
 
 - Never commit `backend/.env` or `frontend/.env.local` — they are git-ignored; only the `.example` templates are tracked.
 - Change the database password: set `POSTGRES_PASSWORD` in a `.env` file next to `docker-compose.yml` and update `DATABASE_URL` in `backend/.env`.
-- Serve everything over HTTPS (secure cookies and HSTS turn on automatically in production builds).
+- Serve everything over HTTPS (secure cookies turn on automatically for HTTPS requests, HSTS when `PUBLIC_BACKEND_URL` is `https://`).
 - Set `PUBLIC_BACKEND_URL` and `CORS_ORIGINS` (backend) and `BACKEND_URL` / `PUBLIC_BACKEND_URL` (frontend) to your real addresses.
 - Per-IP rate limits need the visitor's real IP: put Next.js behind a reverse proxy that overwrites `X-Forwarded-For` and set `TRUST_PROXY_HEADERS=true`. Without it, per-IP limits count all traffic together, and the login lockout can't tell an attacker's IP from the real user's (the frontend logs a warning at startup in production).
 - Rate limits and revoked tokens live in memory, so they reset on restart and assume a single backend process.
