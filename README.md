@@ -89,7 +89,7 @@ npm run dev
 
 ## API Keys
 
-The provider is detected from the key's prefix:
+API keys are available to **logged-in accounts** (Settings → paste your key). Guests always use the free engine — the backend ignores keys sent without a login. The provider is detected from the key's prefix:
 
 | Key | Prompt enhancement | Image generation |
 |-----|-------------------|------------------|
@@ -101,6 +101,24 @@ The provider is detected from the key's prefix:
 
 If a key can't be used (invalid, expired, out of credits, rate-limited…), the Studio shows a popup with the reason and the image is generated with the free engine instead.
 Calls made with your key accrue that provider's standard API charges.
+
+---
+
+## Settings & Preferences
+
+The **⚙️ Settings** page lets every visitor personalize the app (saved per browser in `localStorage`):
+
+| Setting | Options |
+|---------|---------|
+| Theme | Dark · Light · System |
+| Language | English · עברית (right-to-left) · Español · Français |
+| Gallery thumbnail size | Small · Medium · Large |
+| Gallery order | Newest first · Oldest first |
+| Gallery layout | Grid (square) · Masonry (original shapes) |
+
+- **Translations** live in `frontend/src/i18n/` — `en.ts` defines every key, and `he.ts` / `es.ts` / `fr.ts` are type-checked against it, so a missing translation fails `tsc`.
+- **Light theme**: the UI is written with dark classes; `globals.css` mirrors Tailwind's palette under `:root[data-theme="light"]` so every page flips without per-component changes.
+- Theme and text direction are applied by a tiny inline script before first paint (no flash).
 
 ---
 
@@ -130,6 +148,7 @@ PicApp/
 ├── backend/
 │   ├── main.py                 # FastAPI app, CORS, router registration, /auth endpoints
 │   ├── security.py             # Password hashing (argon2) and JWT tokens
+│   ├── auth.py                 # get_current_user / get_optional_user dependencies
 │   ├── database.py             # Engine, session, get_db dependency
 │   ├── models.py               # SQLAlchemy ORM models (User, Prompt, Generation, Favorite)
 │   ├── schemas.py              # Pydantic request/response schemas
@@ -148,7 +167,8 @@ PicApp/
 │   │   ├── settings/page.tsx   # API key management
 │   │   ├── login/, register/   # Auth forms
 │   │   ├── account/            # Logged-in user page
-│   │   └── api/auth/           # Next.js routes that proxy login/register and set the token cookie
+│   │   ├── api/auth/           # Login/register/logout routes that set or clear the token cookie
+│   │   └── api/backend/        # Proxy that forwards API calls with the token from the cookie
 │   ├── components/ui/          # shadcn UI components (Button, Card, Input, Label)
 │   ├── src/
 │   │   ├── components/
@@ -172,13 +192,14 @@ PicApp/
 | `GET` | `/auth/me` | Bearer token | Current user |
 | `POST` | `/api/v1/providers/detect` | — | Detect which provider a key belongs to |
 | `POST` | `/api/v1/prompts/enhance` | optional key | Enhance a prompt |
-| `POST` | `/api/v1/generations/create` | optional key | Generate an image |
-| `GET` | `/api/v1/generations/history` | — | Paginated generation history |
-| `GET` | `/api/v1/generations/stats` | — | Generation and favorite counts |
-| `POST` | `/api/v1/generations/{id}/favorite` | — | Toggle favorite |
-| `DELETE` | `/api/v1/generations/{id}` | — | Delete a generation |
+| `POST` | `/api/v1/generations/create` | optional token + key | Generate an image (saved to the gallery only when logged in) |
+| `GET` | `/api/v1/generations/history` | Bearer token | Your paginated gallery |
+| `GET` | `/api/v1/generations/stats` | Bearer token | Your generation and favorite counts |
+| `POST` | `/api/v1/generations/{id}/favorite` | Bearer token | Toggle favorite on one of your images |
+| `DELETE` | `/api/v1/generations/{id}` | Bearer token | Delete one of your images |
 
-> **Note:** Login/registration works, but the `/api/v1` generation endpoints are not connected to it yet — they still treat every request as the demo user (`user_id=1`), so all users share one gallery.
+> **Note:** Guests can generate images, but only logged-in users get them saved to their personal gallery.
+> The browser never handles the token directly: it is kept in an httpOnly cookie, and `frontend/app/api/backend/[...path]` forwards requests to the backend with the token attached.
 
 ---
 

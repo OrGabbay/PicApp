@@ -1,5 +1,5 @@
 # backend/schemas.py
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List
 from datetime import datetime
 
@@ -37,6 +37,9 @@ class EnhancePromptOut(BaseModel):
     engine: str = "Preset"
     provider: Optional[str] = None
     error: Optional[str] = None
+    # Machine-readable reason (see providers.KeyIssue) so the frontend can translate it
+    error_code: Optional[str] = None
+    error_provider: Optional[str] = None
 
 class DetectProviderIn(BaseModel):
     key: str
@@ -53,8 +56,9 @@ class GenerateImageRequest(BaseModel):
     provider: Optional[str] = None
 
 class GenerationOut(BaseModel):
-    id: int
-    prompt_id: int
+    # id / prompt_id are None for guest generations, which are not saved
+    id: Optional[int] = None
+    prompt_id: Optional[int] = None
     image_url: str
     original_prompt: str
     enhanced_prompt: Optional[str] = None
@@ -62,9 +66,19 @@ class GenerationOut(BaseModel):
     created_at: datetime
     is_favorite: bool = False
     key_warning: Optional[str] = None
+    key_warning_code: Optional[str] = None
+    key_warning_provider: Optional[str] = None
+    key_warning_fallback: Optional[str] = None  # "free" or "partial"
+    saved: bool = True
 
     class Config:
         from_attributes = True
+
+class BulkDeleteIn(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=100)
+
+class BulkDeleteOut(BaseModel):
+    deleted: int
 
 class FavoriteToggleOut(BaseModel):
     generation_id: int

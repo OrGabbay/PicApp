@@ -1,6 +1,7 @@
 # backend/routers/generations.py
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 import models
 import schemas
 import providers
+from auth import get_current_user, get_optional_user
 from database import get_db
 
 logger = logging.getLogger(__name__)
@@ -20,10 +22,14 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 def resolve_api_key(
+    user: Optional[models.User],
     header_api_key: Optional[str],
     header_anthropic_key: Optional[str]
 ) -> Optional[str]:
-    """Resolves API key from headers or server environment variables."""
+    """Resolves API key from headers or server environment variables.
+    API keys are a logged-in feature: guests always get the free engine."""
+    if user is None:
+        return None
     key = header_api_key or header_anthropic_key
     if not key:
         key = (
@@ -38,21 +44,16 @@ def resolve_api_key(
     return None
 
 
-# ---------------------------------------------------------------------------
-# Authentication dependency (Self-healing mock for developmental mode)
-# ---------------------------------------------------------------------------
-def mock_get_current_user(db: Session = Depends(get_db)) -> schemas.UserOut:
-    user = db.query(models.User).filter(models.User.id == 1).first()
-    if not user:
-        user = models.User(
-            id=1,
-            email="test@example.com",
-            password_hash="mock_hash_for_development"
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    return schemas.UserOut(id=user.id, email=user.email, created_at=user.created_at)
+def key_issue_fields(issue: Optional[providers.KeyIssue]) -> dict:
+    """Maps a KeyIssue onto the GenerationOut key_warning* fields."""
+    if issue is None:
+        return {}
+    return {
+        "key_warning": issue.message,
+        "key_warning_code": issue.code,
+        "key_warning_provider": issue.provider or None,
+        "key_warning_fallback": issue.fallback,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +74,7 @@ def enhance_prompt(
     x_api_key: Optional[str] = Header(None, description="Universal AI API Key"),
     x_anthropic_key: Optional[str] = Header(None, description="Anthropic API Key (backward compat)"),
     x_provider: Optional[str] = Header(None, description="Explicit provider name (optional)"),
-    user: schemas.UserOut = Depends(mock_get_current_user),
+    user: Optional[models.User] = Depends(get_optional_user),
 ):
     """
     Enhances a user prompt. Auto-detects company provider (Anthropic, OpenAI, Gemini, Groq, OpenRouter)
@@ -82,7 +83,7 @@ def enhance_prompt(
     if not payload.prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
 
-    api_key = resolve_api_key(x_api_key, x_anthropic_key)
+    api_key = resolve_api_key(user, x_api_key, x_anthropic_key)
     enhanced_prompt = None
     engine_name = "Preset"
     error_detail = None
@@ -106,7 +107,9 @@ def enhance_prompt(
         enhanced_prompt=enhanced_prompt,
         engine=engine_name,
         provider=chosen_provider,
-        error=error_detail,
+        error=error_detail.message if error_detail else None,
+        error_code=error_detail.code if error_detail else None,
+        error_provider=(error_detail.provider or None) if error_detail else None,
     )
 
 
@@ -117,10 +120,11 @@ def create_generation(
     x_anthropic_key: Optional[str] = Header(None, description="Anthropic API Key (backward compat)"),
     x_provider: Optional[str] = Header(None, description="Explicit provider name (optional)"),
     db: Session = Depends(get_db),
-    user: schemas.UserOut = Depends(mock_get_current_user),
+    user: Optional[models.User] = Depends(get_optional_user),
 ):
     """
-    Generates an image from prompt:
+    Generates an image from prompt. The result is saved to the gallery only for logged-in
+    users; guests get the image back with saved=False.
     - If a Gemini key is inserted: Generates natively with Google Imagen 3 (imagen-3.0-generate-002)
     - If an OpenAI key is inserted: Generates natively with OpenAI DALL-E 3 (dall-e-3)
     - If an Anthropic key is inserted: Enhances with Claude 3.5 Sonnet + renders high-res FLUX
@@ -131,17 +135,28 @@ def create_generation(
     if not clean_prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
 
-    api_key = resolve_api_key(x_api_key, x_anthropic_key)
+    api_key = resolve_api_key(user, x_api_key, x_anthropic_key)
     chosen_provider = request.provider or x_provider
 
     # Generate image using provider's native model
-    image_url, enhanced_prompt, engine_name, key_warning = providers.generate_image_with_provider(
+    image_url, enhanced_prompt, engine_name, key_issue = providers.generate_image_with_provider(
         prompt=clean_prompt,
         key=api_key,
         aspect_ratio=request.aspect_ratio or "1:1",
         style=request.style,
         provider=chosen_provider,
     )
+
+    if user is None:
+        return schemas.GenerationOut(
+            image_url=image_url,
+            original_prompt=clean_prompt,
+            enhanced_prompt=enhanced_prompt,
+            engine=engine_name,
+            created_at=datetime.now(timezone.utc),
+            saved=False,
+            **key_issue_fields(key_issue),
+        )
 
     try:
         # Store prompt and generation record
@@ -173,7 +188,7 @@ def create_generation(
             engine=engine_name,
             created_at=db_generation.created_at,
             is_favorite=False,
-            key_warning=key_warning,
+            **key_issue_fields(key_issue),
         )
     except Exception as exc:
         db.rollback()
@@ -189,10 +204,11 @@ def get_history(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     only_favorites: bool = Query(False),
-    user: schemas.UserOut = Depends(mock_get_current_user),
+    sort: str = Query("newest", pattern="^(newest|oldest)$"),
+    user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Returns user generation history. Supports pagination and favorites filtering."""
+    """Returns user generation history. Supports pagination, favorites filtering and sorting."""
     offset = (page - 1) * limit
 
     query = (
@@ -208,7 +224,8 @@ def get_history(
         query = query.join(models.Favorite).filter(models.Favorite.user_id == user.id)
 
     total = query.count()
-    generations = query.order_by(models.Generation.created_at.desc()).offset(offset).limit(limit).all()
+    order = models.Generation.created_at.asc() if sort == "oldest" else models.Generation.created_at.desc()
+    generations = query.order_by(order, models.Generation.id).offset(offset).limit(limit).all()
 
     favorite_gen_ids = {
         fav.generation_id
@@ -243,11 +260,15 @@ def get_history(
 @router.post("/generations/{generation_id}/favorite", response_model=schemas.FavoriteToggleOut)
 def toggle_favorite(
     generation_id: int,
-    user: schemas.UserOut = Depends(mock_get_current_user),
+    user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Toggles favorite status for a given generation."""
-    generation = db.query(models.Generation).filter(models.Generation.id == generation_id).first()
+    generation = (
+        db.query(models.Generation)
+        .filter(models.Generation.id == generation_id, models.Generation.user_id == user.id)
+        .first()
+    )
     if not generation:
         raise HTTPException(status_code=404, detail="Generation not found.")
 
@@ -268,13 +289,26 @@ def toggle_favorite(
         return schemas.FavoriteToggleOut(generation_id=generation_id, is_favorite=True)
 
 
+def _delete_generation(db: Session, generation: models.Generation) -> str:
+    """Deletes a generation (without committing) and returns its image URL for file cleanup."""
+    image_url = generation.image_url
+    # Each generation gets its own prompt row; delete the prompt with its last generation
+    # (the cascade removes the generation) so no orphaned prompts are left behind
+    prompt = generation.prompt
+    if prompt is not None and len(prompt.generations) == 1:
+        db.delete(prompt)
+    else:
+        db.delete(generation)
+    return image_url
+
+
 @router.delete("/generations/{generation_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_generation(
     generation_id: int,
-    user: schemas.UserOut = Depends(mock_get_current_user),
+    user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Deletes a generation from the user's gallery."""
+    """Deletes one of the user's generations."""
     generation = (
         db.query(models.Generation)
         .filter(models.Generation.id == generation_id, models.Generation.user_id == user.id)
@@ -283,14 +317,36 @@ def delete_generation(
     if not generation:
         raise HTTPException(status_code=404, detail="Generation not found.")
 
-    db.delete(generation)
+    image_url = _delete_generation(db, generation)
     db.commit()
+    # Remove the saved file only once the database change succeeded
+    providers.delete_saved_image(image_url)
     return None
+
+
+@router.post("/generations/delete", response_model=schemas.BulkDeleteOut)
+def delete_generations(
+    payload: schemas.BulkDeleteIn,
+    user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Deletes several of the user's generations at once. IDs that don't exist or belong to
+    another user are skipped; the response says how many were deleted."""
+    generations = (
+        db.query(models.Generation)
+        .filter(models.Generation.id.in_(set(payload.ids)), models.Generation.user_id == user.id)
+        .all()
+    )
+    image_urls = [_delete_generation(db, generation) for generation in generations]
+    db.commit()
+    for image_url in image_urls:
+        providers.delete_saved_image(image_url)
+    return schemas.BulkDeleteOut(deleted=len(image_urls))
 
 
 @router.get("/generations/stats", response_model=schemas.StatsOut)
 def get_user_stats(
-    user: schemas.UserOut = Depends(mock_get_current_user),
+    user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Returns total generations and favorites count for the user."""

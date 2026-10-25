@@ -7,6 +7,7 @@ import secrets
 import urllib.request
 import urllib.parse
 import urllib.error
+from dataclasses import dataclass, replace
 from typing import Optional, Tuple
 
 import anthropic
@@ -81,7 +82,19 @@ def get_provider_label(provider: str) -> str:
     }
     return labels.get(provider, "Custom Provider")
 
-def describe_key_error(exc: Exception, provider_name: str, detail: Optional[str] = None) -> str:
+@dataclass(frozen=True)
+class KeyIssue:
+    """Why a user's API key could not be used. `code` is machine-readable so the frontend can
+    show the reason in the user's language; `message` is the English description."""
+    code: str
+    provider: str
+    message: str
+    # What happened instead: "free" = free engine only, "partial" = the key improved the prompt
+    # but the free engine drew the image
+    fallback: str = "free"
+
+
+def describe_key_error(exc: Exception, provider_name: str, detail: Optional[str] = None) -> KeyIssue:
     """Turns a provider API failure into a short, user-facing reason why the key can't be used."""
     status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     text = (detail or str(exc)).lower()
@@ -90,20 +103,20 @@ def describe_key_error(exc: Exception, provider_name: str, detail: Optional[str]
         isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError)
     )
     if is_network:
-        reason = "could not be reached (network error or timeout)"
+        code, reason = "network", "could not be reached (network error or timeout)"
     elif status == 402 or any(s in text for s in ("credit balance", "insufficient_quota", "billing")):
-        reason = "has run out of credits or tokens"
+        code, reason = "no_credits", "has run out of credits or tokens"
     elif status == 401 or "api key not valid" in text or "invalid x-api-key" in text:
-        reason = "is invalid, expired or has been revoked"
+        code, reason = "invalid_key", "is invalid, expired or has been revoked"
     elif status == 403:
-        reason = "does not have permission to use this model"
+        code, reason = "no_permission", "does not have permission to use this model"
     elif status == 404:
-        reason = "does not have access to the required model"
+        code, reason = "no_model_access", "does not have access to the required model"
     elif status == 429:
-        reason = "has hit its rate limit or usage quota"
+        code, reason = "rate_limited", "has hit its rate limit or usage quota"
     else:
-        reason = f"returned an unexpected error ({status or type(exc).__name__})"
-    return f"Your {provider_name} key {reason}."
+        code, reason = "unknown", f"returned an unexpected error ({status or type(exc).__name__})"
+    return KeyIssue(code, provider_name, f"Your {provider_name} key {reason}.")
 
 def smart_enhance_prompt(prompt: str, style: Optional[str] = None) -> str:
     """Local prompt engineer when no external API key is used."""
@@ -125,13 +138,31 @@ def build_pollinations_url(prompt: str, aspect_ratio: str = "1:1") -> str:
     seed = secrets.token_hex(4)
     return f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&nologo=true&seed={seed}"
 
+STATIC_URL_PREFIX = "http://localhost:8000/static/generations/"
+
+def delete_saved_image(image_url: str) -> None:
+    """Removes an image file saved by save_image_bytes. URLs that point elsewhere
+    (e.g. Pollinations) are ignored, and only files inside STATIC_DIR can be touched."""
+    if not image_url or not image_url.startswith(STATIC_URL_PREFIX):
+        return
+    filename = os.path.basename(image_url[len(STATIC_URL_PREFIX):])
+    path = os.path.join(STATIC_DIR, filename)
+    if not filename or os.path.dirname(os.path.abspath(path)) != os.path.abspath(STATIC_DIR):
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("Could not delete saved image %s: %s", path, exc)
+
 def save_image_bytes(image_data: bytes, prefix: str = "gen") -> str:
     """Saves raw image bytes to the backend static storage and returns permanent URL."""
     filename = f"{prefix}_{secrets.token_hex(6)}.jpg"
     filepath = os.path.join(STATIC_DIR, filename)
     with open(filepath, "wb") as f:
         f.write(image_data)
-    return f"http://localhost:8000/static/generations/{filename}"
+    return f"{STATIC_URL_PREFIX}{filename}"
 
 
 # ---------------------------------------------------------------------------
@@ -143,11 +174,11 @@ def enhance_with_provider(
     key: str,
     style: Optional[str] = None,
     provider: Optional[str] = None,
-) -> Tuple[Optional[str], str, Optional[str]]:
+) -> Tuple[Optional[str], str, Optional[KeyIssue]]:
     """
     Enhances prompt text using the provider's LLM model.
     Returns: (enhanced_prompt, provider_display_name, error_detail)
-    error_detail is a user-facing reason the key could not be used, or None on success.
+    error_detail is a KeyIssue describing why the key could not be used, or None on success.
     """
     clean_key = key.strip()
     if not clean_key or clean_key == "sk-ant-your-actual-api-key-here":
@@ -171,11 +202,11 @@ def enhance_with_provider(
                 fallbacks="default",
             )
             if res.stop_reason == "refusal":
-                return None, "Anthropic (Failed)", "Claude declined to rewrite this prompt."
+                return None, "Anthropic (Failed)", KeyIssue("refused", "Anthropic", "Claude declined to rewrite this prompt.")
             # Thinking blocks may precede the answer, so pick the first text block
             text = next((b.text for b in res.content if b.type == "text"), "").strip()
             if not text:
-                return None, "Anthropic (Failed)", "Claude returned an empty prompt."
+                return None, "Anthropic (Failed)", KeyIssue("empty_response", "Anthropic", "Claude returned an empty prompt.")
             return text, "Anthropic Claude", None
         except anthropic.APIError as exc:
             logger.warning("Anthropic API failed: %s", exc)
@@ -224,7 +255,7 @@ def enhance_with_provider(
                     parts = candidates[0]["content"].get("parts", [])
                     if parts and "text" in parts[0]:
                         return parts[0]["text"].strip(), "Google Gemini", None
-                return None, "Google Gemini", "Google Gemini returned no prompt text."
+                return None, "Google Gemini", KeyIssue("empty_response", "Google Gemini", "Google Gemini returned no prompt text.")
         except urllib.error.HTTPError as exc:
             err_body = exc.read().decode("utf-8", errors="ignore")
             logger.warning("Google Gemini HTTP error (%s): %s", exc.code, err_body)
@@ -254,7 +285,7 @@ def enhance_with_provider(
             logger.warning("Groq API failed: %s", exc)
             return None, "Groq (Failed)", describe_key_error(exc, "Groq")
 
-    return None, "Preset", "This key's provider is not supported yet."
+    return None, "Preset", KeyIssue("unsupported_provider", "", "This key's provider is not supported yet.")
 
 
 # ---------------------------------------------------------------------------
@@ -263,12 +294,20 @@ def enhance_with_provider(
 
 FREE_ENGINE_NOTE = "The image was generated with the free engine instead."
 
-def _free_generation(prompt: str, aspect_ratio: str, style: Optional[str], key_warning: Optional[str] = None) -> Tuple[str, str, str, Optional[str]]:
+def _free_generation(prompt: str, aspect_ratio: str, style: Optional[str], issue: Optional[KeyIssue] = None) -> Tuple[str, str, str, Optional[KeyIssue]]:
     enhanced_prompt = smart_enhance_prompt(prompt, style)
     poll_url = build_pollinations_url(enhanced_prompt, aspect_ratio)
-    if key_warning:
-        key_warning = f"{key_warning} {FREE_ENGINE_NOTE}"
-    return poll_url, enhanced_prompt, "Fast AI Engine (Free)", key_warning
+    if issue:
+        issue = replace(issue, message=f"{issue.message} {FREE_ENGINE_NOTE}", fallback="free")
+    return poll_url, enhanced_prompt, "Fast AI Engine (Free)", issue
+
+def _partial_issue(issue: KeyIssue, model: str) -> KeyIssue:
+    """The key works for text but not images: it improved the prompt, the free engine drew it."""
+    return replace(
+        issue,
+        message=f"{issue.message} {model} improved your prompt, but the image was rendered with the free engine.",
+        fallback="partial",
+    )
 
 def generate_image_with_provider(
     prompt: str,
@@ -276,7 +315,7 @@ def generate_image_with_provider(
     aspect_ratio: str = "1:1",
     style: Optional[str] = None,
     provider: Optional[str] = None,
-) -> Tuple[str, str, str, Optional[str]]:
+) -> Tuple[str, str, str, Optional[KeyIssue]]:
     """
     Generates an image using the company's native image generation API:
     - Google Gemini key: Generates via Google Imagen 3 (imagen-3.0-generate-002)
@@ -284,8 +323,8 @@ def generate_image_with_provider(
     - Anthropic key: Enhances with Claude Opus 5.5 + renders with FLUX (Anthropic has no image API)
     - Groq key: Enhances with Groq Llama 3.3 + renders with FLUX
     - No key / unusable key: Uses smart style heuristics + renders with FLUX
-    Returns: (image_url, enhanced_prompt, engine_name, key_warning)
-    key_warning is a user-facing message when a key was supplied but could not be used.
+    Returns: (image_url, enhanced_prompt, engine_name, key_issue)
+    key_issue explains why a supplied key could not be (fully) used, or is None.
     """
     clean_key = key.strip() if key else None
     chosen_provider = provider or (detect_provider(clean_key) if clean_key else None)
@@ -334,8 +373,7 @@ def generate_image_with_provider(
             if not enhanced:
                 return _free_generation(prompt, aspect_ratio, style, text_error or image_error)
             poll_url = build_pollinations_url(enhanced, aspect_ratio)
-            warning = f"{image_error} Gemini improved your prompt, but the image was rendered with the free engine."
-            return poll_url, enhanced, "Google Gemini + FLUX Engine", warning
+            return poll_url, enhanced, "Google Gemini + FLUX Engine", _partial_issue(image_error, "Gemini")
 
     # ── 2. OPENAI: DALL-E 3 ──────────────────────────────────────────────────
     if chosen_provider == "openai":
@@ -375,8 +413,7 @@ def generate_image_with_provider(
             if not enhanced:
                 return _free_generation(prompt, aspect_ratio, style, text_error or image_error)
             poll_url = build_pollinations_url(enhanced, aspect_ratio)
-            warning = f"{image_error} GPT-4o improved your prompt, but the image was rendered with the free engine."
-            return poll_url, enhanced, "OpenAI GPT-4o + FLUX Engine", warning
+            return poll_url, enhanced, "OpenAI GPT-4o + FLUX Engine", _partial_issue(image_error, "GPT-4o")
 
     # ── 3. ANTHROPIC: CLAUDE OPUS 5.5 + HIGH-RES FLUX ──────────────────────
     if chosen_provider == "anthropic":
@@ -398,4 +435,7 @@ def generate_image_with_provider(
 
     # ── 5. UNRECOGNISED KEY ─────────────────────────────────────────────────
     logger.info("Unrecognised key format; generating with free engine...")
-    return _free_generation(prompt, aspect_ratio, style, "Your API key format was not recognised.")
+    return _free_generation(
+        prompt, aspect_ratio, style,
+        KeyIssue("unrecognized_key", "", "Your API key format was not recognised."),
+    )

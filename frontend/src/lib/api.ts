@@ -8,9 +8,19 @@ import type {
   FavoriteToggleResponse,
   UserStats,
   DetectProviderResponse,
+  CurrentUser,
 } from "@/src/types/api";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+/** All backend calls go through the Next.js proxy, which attaches the login cookie's token. */
+const API_BASE = "/api/backend";
+
+/** Thrown when an endpoint needs a logged-in user (backend answered 401). */
+export class AuthRequiredError extends Error {
+  constructor() {
+    super("Please log in to continue.");
+    this.name = "AuthRequiredError";
+  }
+}
 
 /** Read the user's stored AI key from localStorage (supporting universal key & legacy key). */
 export function getUserApiKey(): string {
@@ -22,15 +32,31 @@ export function getUserApiKey(): string {
   );
 }
 
+/** Remove the stored AI key and provider (called on logout so the key doesn't outlive the session). */
+export function clearStoredApiKey(): void {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem("ai_user_key");
+  localStorage.removeItem("anthropic_user_key");
+  localStorage.removeItem("ai_user_provider");
+}
+
 /** Read the user's selected provider or auto-detect preference. */
 export function getUserProvider(): string {
   if (typeof window === "undefined") return "";
   return localStorage.getItem("ai_user_provider")?.trim() || "";
 }
 
-function getAuthToken(): string {
-  if (typeof window === "undefined") return "";
-  return localStorage.getItem("token")?.trim() ?? "";
+/** Returns the logged-in user, or null for guests. */
+export async function getCurrentUser(): Promise<CurrentUser | null> {
+  const res = await fetch(`${API_BASE}/auth/me`, { cache: "no-store" });
+  if (res.status === 401) return null;
+  if (!res.ok) throw new Error("Failed to check login status");
+  return res.json();
+}
+
+/** Clears the login cookie. */
+export async function logout(): Promise<void> {
+  await fetch("/api/auth/logout", { method: "POST" });
 }
 
 /**
@@ -60,7 +86,6 @@ export async function enhancePrompt(
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${getAuthToken()}`,
   };
 
   if (apiKey) {
@@ -77,6 +102,7 @@ export async function enhancePrompt(
     body: JSON.stringify(payload),
   });
 
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error((err as { detail?: string }).detail ?? "Failed to enhance prompt");
@@ -96,7 +122,6 @@ export async function createGeneration(
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${getAuthToken()}`,
   };
 
   if (apiKey) {
@@ -113,6 +138,7 @@ export async function createGeneration(
     body: JSON.stringify(payload),
   });
 
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error((err as { detail?: string }).detail ?? "Failed to generate image");
@@ -126,23 +152,23 @@ export async function createGeneration(
 export async function getGenerationHistory(
   page = 1,
   limit = 20,
-  onlyFavorites = false
+  onlyFavorites = false,
+  sort: "newest" | "oldest" = "newest"
 ): Promise<PaginatedGenerations> {
   const params = new URLSearchParams({
     page: String(page),
     limit: String(limit),
+    sort,
   });
   if (onlyFavorites) {
     params.set("only_favorites", "true");
   }
 
   const res = await fetch(`${API_BASE}/api/v1/generations/history?${params.toString()}`, {
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getAuthToken()}`,
-    },
+    headers: { "Content-Type": "application/json" },
   });
 
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) {
     throw new Error("Failed to fetch generation history");
   }
@@ -157,12 +183,10 @@ export async function toggleFavorite(
 ): Promise<FavoriteToggleResponse> {
   const res = await fetch(`${API_BASE}/api/v1/generations/${generationId}/favorite`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getAuthToken()}`,
-    },
+    headers: { "Content-Type": "application/json" },
   });
 
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) {
     throw new Error("Failed to update favorite status");
   }
@@ -175,26 +199,38 @@ export async function toggleFavorite(
 export async function deleteGeneration(generationId: number): Promise<void> {
   const res = await fetch(`${API_BASE}/api/v1/generations/${generationId}`, {
     method: "DELETE",
-    headers: {
-      Authorization: `Bearer ${getAuthToken()}`,
-    },
   });
 
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) {
     throw new Error("Failed to delete generation");
   }
 }
 
 /**
+ * Delete several of the user's generations at once. Returns how many were deleted.
+ */
+export async function deleteGenerations(ids: number[]): Promise<number> {
+  const res = await fetch(`${API_BASE}/api/v1/generations/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+
+  if (res.status === 401) throw new AuthRequiredError();
+  if (!res.ok) {
+    throw new Error("Failed to delete generations");
+  }
+  return (await res.json()).deleted;
+}
+
+/**
  * Fetch generation statistics for the current user.
  */
 export async function getUserStats(): Promise<UserStats> {
-  const res = await fetch(`${API_BASE}/api/v1/generations/stats`, {
-    headers: {
-      Authorization: `Bearer ${getAuthToken()}`,
-    },
-  });
+  const res = await fetch(`${API_BASE}/api/v1/generations/stats`);
 
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) {
     throw new Error("Failed to fetch user stats");
   }

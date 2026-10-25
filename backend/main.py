@@ -7,25 +7,20 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-import jwt
-from jwt.exceptions import InvalidTokenError
-
 from routers import generations
 import models
 import schemas
+from auth import get_current_user
 from database import engine, SessionLocal, get_db
 from security import (
     hash_password,
     verify_password,
     create_access_token,
-    SECRET_KEY,
-    ALGORITHM,
 )
 
 # Ensure static storage directory exists for saved generated images
@@ -38,29 +33,18 @@ async def lifespan(app: FastAPI):
     # Ensure database schema is created
     models.Base.metadata.create_all(bind=engine)
 
-    # Ensure default user (id=1) exists for developmental / demo mode
-    db = SessionLocal()
-    try:
-        user = db.query(models.User).filter(models.User.id == 1).first()
-        if not user:
-            demo_user = models.User(
-                id=1,
-                email="test@example.com",
-                password_hash="mock_hash_for_development"
-            )
-            db.add(demo_user)
-            db.commit()
-
-        # The demo user is inserted with an explicit id, which doesn't advance Postgres' id
-        # sequence; resync it so the first /auth/register doesn't collide with id=1
-        if engine.dialect.name == "postgresql":
+    # Databases created by older versions contain a demo user inserted with an explicit id,
+    # which doesn't advance Postgres' id sequence; resync it so /auth/register can't collide
+    if engine.dialect.name == "postgresql":
+        db = SessionLocal()
+        try:
             db.execute(text(
                 "SELECT setval(pg_get_serial_sequence('users', 'id'), "
-                "(SELECT COALESCE(MAX(id), 1) FROM users))"
+                "(SELECT COALESCE(MAX(id), 0) + 1 FROM users), false)"
             ))
             db.commit()
-    finally:
-        db.close()
+        finally:
+            db.close()
 
     yield
 
@@ -122,41 +106,6 @@ def login(
         "token_type": "bearer",
         "user": user,
     }
-
-bearer_scheme = HTTPBearer(auto_error=False)
-
-
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-    db: Session = Depends(get_db),
-):
-    auth_error = HTTPException(
-        status_code=401,
-        detail="Invalid or expired token",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-    if credentials is None:
-        raise auth_error
-
-    try:
-        payload = jwt.decode(
-            credentials.credentials,
-            SECRET_KEY,
-            algorithms=[ALGORITHM],
-            options={"require": ["sub", "exp"]},
-        )
-        user_id = int(payload["sub"])
-    except (InvalidTokenError, ValueError, TypeError):
-        raise auth_error
-
-    user = db.get(models.User, user_id)
-
-    if user is None:
-        raise auth_error
-
-    return user
-
 
 @app.get("/auth/me", response_model=schemas.UserOut)
 def read_current_user(

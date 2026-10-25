@@ -8,10 +8,14 @@ import {
   toggleFavorite,
   downloadImage,
   detectProvider,
+  AuthRequiredError,
 } from '@/src/lib/api';
+import { useCurrentUser } from '@/src/lib/useCurrentUser';
+import { useI18n, describeKeyIssue, translateServerMessage, type MessageKey } from '@/src/i18n';
 import ImageCard from '@/src/components/ImageCard';
 import type { GenerationItem, AspectRatio, ImageStyle } from '@/src/types/api';
 
+// Kept in English on purpose: these are sent to the image engine, which works best in English
 const INSPIRATION_PROMPTS = [
   'A majestic golden eagle soaring over snow-capped mountains at sunset',
   'Cyberpunk street vendor in neon-lit futuristic Tokyo alley in the rain',
@@ -32,19 +36,17 @@ const STYLES: { label: ImageStyle; icon: string }[] = [
   { label: 'Minimalist', icon: '⚪' },
 ];
 
-const ASPECT_RATIOS: { value: AspectRatio; label: string; sub: string; iconW: number; iconH: number }[] = [
-  { value: '1:1',  label: 'Square',    sub: '1024×1024', iconW: 16, iconH: 16 },
-  { value: '16:9', label: 'Landscape', sub: '1920×1080', iconW: 22, iconH: 13 },
-  { value: '9:16', label: 'Portrait',  sub: '576×1024',  iconW: 13, iconH: 22 },
-  { value: '4:3',  label: 'Classic',   sub: '1024×768',  iconW: 18, iconH: 14 },
+const ASPECT_RATIOS: { value: AspectRatio; label: MessageKey; sub: string; iconW: number; iconH: number }[] = [
+  { value: '1:1',  label: 'aspect.square',    sub: '1024×1024', iconW: 16, iconH: 16 },
+  { value: '16:9', label: 'aspect.landscape', sub: '1920×1080', iconW: 22, iconH: 13 },
+  { value: '9:16', label: 'aspect.portrait',  sub: '576×1024',  iconW: 13, iconH: 22 },
+  { value: '4:3',  label: 'aspect.classic',   sub: '1024×768',  iconW: 18, iconH: 14 },
 ];
 
-const GENERATION_STEPS = [
-  'Optimizing visual aesthetics & prompt...',
-  'Synthesizing textures, atmosphere & lighting...',
-  'Rendering ultra-high resolution output...',
-  'Finalizing image details...',
-];
+const GENERATION_STEPS: MessageKey[] = ['studio.step1', 'studio.step2', 'studio.step3', 'studio.step4'];
+
+// Marker for a key whose provider couldn't be detected (shown as "Custom AI Engine")
+const CUSTOM_ENGINE = 'custom';
 
 export default function StudioPage() {
   const [prompt, setPrompt]                   = useState('');
@@ -60,6 +62,10 @@ export default function StudioPage() {
   const [activeEngineName, setActiveEngineName] = useState<string | null>(null);
   const [copiedPrompt, setCopiedPrompt]       = useState(false);
   const [keyWarning, setKeyWarning]           = useState<string | null>(null);
+  const user = useCurrentUser();
+  const { t, rich, language } = useI18n();
+  // The backend only uses API keys for logged-in users, so guests are always in free mode
+  const keyEngineName = user ? activeEngineName : null;
 
   // Check for saved API key and detect provider
   useEffect(() => {
@@ -73,23 +79,27 @@ export default function StudioPage() {
         if (res.provider !== 'unknown') {
           setActiveEngineName(res.name);
         } else {
-          setActiveEngineName('Custom AI Engine');
+          setActiveEngineName(CUSTOM_ENGINE);
         }
       });
     } else {
       setActiveEngineName(null);
     }
+  }, []);
 
+  // Recent generations come from the user's gallery, so they only exist when logged in
+  useEffect(() => {
+    if (!user) return;
     getGenerationHistory(1, 12)
       .then((data) => {
         setHistory(data.items);
         if (data.items.length > 0) {
-          setCurrentImage(data.items[0]);
+          setCurrentImage((current) => current ?? data.items[0]);
           setImageLoaded(true);
         }
       })
       .catch(() => {});
-  }, []);
+  }, [user]);
 
   // Cycle animated loading status steps while generating
   useEffect(() => {
@@ -112,10 +122,14 @@ export default function StudioPage() {
       });
       setPrompt(result.enhanced_prompt);
       if (result.error) {
-        setKeyWarning(`${result.error} Your prompt was enhanced with the built-in presets instead.`);
+        setKeyWarning(describeKeyIssue(
+          language,
+          { code: result.error_code, provider: result.error_provider, message: result.error },
+          'enhance',
+        ));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not enhance prompt.');
+      setError(err instanceof Error ? translateServerMessage(language, err.message) : t('studio.enhanceFailed'));
     } finally {
       setIsEnhancing(false);
     }
@@ -135,16 +149,34 @@ export default function StudioPage() {
         style: selectedStyle || undefined,
       });
       setCurrentImage(newImage);
-      if (newImage.key_warning) setKeyWarning(newImage.key_warning);
-      setHistory((prev) => [newImage, ...prev.filter((i) => i.id !== newImage.id).slice(0, 11)]);
+      if (newImage.key_warning) {
+        setKeyWarning(describeKeyIssue(
+          language,
+          {
+            code: newImage.key_warning_code,
+            provider: newImage.key_warning_provider,
+            fallback: newImage.key_warning_fallback,
+            message: newImage.key_warning,
+          },
+          'generate',
+        ));
+      }
+      if (newImage.saved !== false) {
+        setHistory((prev) => [newImage, ...prev.filter((i) => i.id !== newImage.id).slice(0, 11)]);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Generation failed. Please try again.');
+      if (err instanceof AuthRequiredError) {
+        setError(t('studio.sessionExpired'));
+      } else {
+        setError(err instanceof Error ? translateServerMessage(language, err.message) : t('studio.generationFailed'));
+      }
     } finally {
       setIsGenerating(false);
     }
   };
 
   const handleToggleFav = async (img: GenerationItem) => {
+    if (img.id === null) return;
     try {
       const res = await toggleFavorite(img.id);
       const updated = { ...img, is_favorite: res.is_favorite };
@@ -175,22 +207,22 @@ export default function StudioPage() {
       {/* ── Studio Header & Engine Status ── */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div>
-          <h1 className="text-3xl font-extrabold text-white tracking-tight">AI Image Studio</h1>
-          <p className="text-zinc-400 text-sm mt-1">Transform concepts into high-resolution imagery</p>
+          <h1 className="text-3xl font-extrabold text-white tracking-tight">{t('studio.title')}</h1>
+          <p className="text-zinc-400 text-sm mt-1">{t('studio.subtitle')}</p>
         </div>
 
         <Link
           href="/settings"
           className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-            activeEngineName
+            keyEngineName
               ? 'bg-blue-950/40 border-blue-700/50 text-blue-300 hover:bg-blue-900/40'
               : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700'
           }`}
         >
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          {activeEngineName
-            ? `✨ ${activeEngineName} Active · Settings →`
-            : '⚡ Free AI Generation Mode · Settings →'}
+          {keyEngineName
+            ? t('studio.engineActive', { engine: keyEngineName === CUSTOM_ENGINE ? t('studio.customEngine') : keyEngineName })
+            : t('studio.freeMode')}
         </Link>
       </div>
 
@@ -204,7 +236,7 @@ export default function StudioPage() {
           <div className="bg-zinc-900/90 border border-zinc-800 rounded-3xl p-5 shadow-lg shadow-black/40 flex flex-col gap-3 focus-within:border-zinc-700 transition-all">
             <div className="flex items-center justify-between">
               <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
-                Image Prompt
+                {t('studio.promptLabel')}
               </label>
               <button
                 type="button"
@@ -217,7 +249,7 @@ export default function StudioPage() {
                 ) : (
                   <span>✨</span>
                 )}
-                {isEnhancing ? 'Enhancing...' : 'Enhance Prompt'}
+                {isEnhancing ? t('studio.enhancing') : t('studio.enhance')}
               </button>
             </div>
 
@@ -225,15 +257,17 @@ export default function StudioPage() {
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Describe whatever you imagine... (e.g. A cybernetic owl perched on a neon streetlight at dusk)"
+              placeholder={t('studio.placeholder')}
               rows={4}
               className="w-full bg-transparent text-white placeholder:text-zinc-600 focus:outline-none resize-none text-sm leading-relaxed"
             />
 
             <div className="flex items-center justify-between border-t border-zinc-800/80 pt-3 text-xs text-zinc-500">
-              <span>{prompt.length} characters</span>
+              <span>{t('studio.characters', { count: prompt.length })}</span>
               <span className="hidden sm:inline">
-                Press <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono text-[10px]">Ctrl+Enter</kbd> to generate
+                {rich('studio.shortcut', {
+                  key: <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono text-[10px]" dir="ltr">Ctrl+Enter</kbd>,
+                })}
               </span>
             </div>
           </div>
@@ -241,7 +275,7 @@ export default function StudioPage() {
           {/* Prompt Inspiration Chips */}
           <div>
             <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">
-              💡 Need Inspiration?
+              {t('studio.inspiration')}
             </div>
             <div className="flex flex-wrap gap-1.5">
               {INSPIRATION_PROMPTS.map((sample) => (
@@ -249,7 +283,8 @@ export default function StudioPage() {
                   key={sample}
                   type="button"
                   onClick={() => setPrompt(sample)}
-                  className="text-left text-xs bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white px-3 py-1.5 rounded-xl border border-zinc-800/80 hover:border-zinc-700 transition-colors line-clamp-1"
+                  dir="ltr"
+                  className="text-start text-xs bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white px-3 py-1.5 rounded-xl border border-zinc-800/80 hover:border-zinc-700 transition-colors line-clamp-1"
                 >
                   {sample}
                 </button>
@@ -261,14 +296,14 @@ export default function StudioPage() {
           <div className="bg-zinc-900/90 border border-zinc-800 rounded-3xl p-5">
             <div className="flex items-center justify-between mb-3">
               <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
-                Art Style
+                {t('studio.artStyle')}
               </label>
               {selectedStyle && (
                 <button
                   onClick={() => setSelectedStyle(null)}
                   className="text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors"
                 >
-                  Clear Style
+                  {t('studio.clearStyle')}
                 </button>
               )}
             </div>
@@ -286,7 +321,7 @@ export default function StudioPage() {
                   }`}
                 >
                   <span className="text-lg mb-1">{icon}</span>
-                  <span className="text-[11px] truncate w-full text-center">{label}</span>
+                  <span className="text-[11px] truncate w-full text-center">{t(`style.${label}` as MessageKey)}</span>
                 </button>
               ))}
             </div>
@@ -295,7 +330,7 @@ export default function StudioPage() {
           {/* Aspect Ratio Selector */}
           <div className="bg-zinc-900/90 border border-zinc-800 rounded-3xl p-5">
             <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">
-              Aspect Ratio
+              {t('studio.aspectRatio')}
             </label>
             <div className="grid grid-cols-4 gap-2">
               {ASPECT_RATIOS.map(({ value, label, sub, iconW, iconH }) => (
@@ -318,11 +353,32 @@ export default function StudioPage() {
                     />
                   </div>
                   <span className="text-xs font-semibold">{value}</span>
-                  <span className="text-[10px] text-zinc-500">{label}</span>
+                  <span className="text-[10px] text-zinc-500">{t(label)}</span>
                 </button>
               ))}
             </div>
           </div>
+
+          {/* Guest notice: generating works, but nothing is saved */}
+          {user === null && (
+            <div className="flex items-start gap-3 bg-amber-950/30 border border-amber-800/50 rounded-2xl p-4">
+              <span className="text-amber-400 text-lg">🔒</span>
+              <p className="text-xs text-amber-200/90 leading-relaxed">
+                {rich('studio.guestNotice', {
+                  login: (
+                    <Link href="/login" className="font-semibold text-amber-300 underline hover:text-amber-200">
+                      {t('studio.guestLogin')}
+                    </Link>
+                  ),
+                  signup: (
+                    <Link href="/register" className="font-semibold text-amber-300 underline hover:text-amber-200">
+                      {t('studio.guestSignup')}
+                    </Link>
+                  ),
+                })}
+              </p>
+            </div>
+          )}
 
           {/* Error Message */}
           {error && (
@@ -349,11 +405,11 @@ export default function StudioPage() {
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                 </svg>
-                <span>Creating Artwork...</span>
+                <span>{t('studio.creating')}</span>
               </>
             ) : (
               <>
-                <span>🎨 Generate Artwork</span>
+                <span>{t('studio.generate')}</span>
               </>
             )}
           </button>
@@ -372,9 +428,9 @@ export default function StudioPage() {
                   </div>
                 </div>
                 <div>
-                  <h3 className="text-white font-bold text-lg mb-1">Generating Artwork</h3>
+                  <h3 className="text-white font-bold text-lg mb-1">{t('studio.generatingTitle')}</h3>
                   <p className="text-blue-400 text-xs font-medium animate-pulse min-h-[20px]">
-                    {GENERATION_STEPS[generationStep]}
+                    {t(GENERATION_STEPS[generationStep])}
                   </p>
                 </div>
                 <div className="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden">
@@ -406,9 +462,9 @@ export default function StudioPage() {
                   🖼️
                 </div>
                 <div>
-                  <h3 className="text-white font-bold text-lg">Your Canvas Awaits</h3>
+                  <h3 className="text-white font-bold text-lg">{t('studio.canvasTitle')}</h3>
                   <p className="text-zinc-500 text-sm mt-1 leading-relaxed">
-                    Type an idea into the prompt box, select a style, and hit generate to watch it materialize in high resolution.
+                    {t('studio.canvasText')}
                   </p>
                 </div>
               </div>
@@ -422,12 +478,17 @@ export default function StudioPage() {
               <div className="flex flex-wrap gap-2 pb-3 border-b border-zinc-800/80">
                 <button
                   type="button"
-                  onClick={() => downloadImage(currentImage.image_url, `picapp-${currentImage.id}.jpg`)}
+                  onClick={() => downloadImage(currentImage.image_url, `picapp-${currentImage.id ?? 'guest'}.jpg`)}
                   className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold transition-colors"
                 >
-                  <span>💾</span> Download Image
+                  <span>💾</span> {t('studio.download')}
                 </button>
 
+                {currentImage.id === null ? (
+                  <span className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-medium border border-amber-800/50 bg-amber-950/30 text-amber-300">
+                    <span>🔒</span> {t('studio.notSaved')}
+                  </span>
+                ) : (
                 <button
                   type="button"
                   onClick={() => handleToggleFav(currentImage)}
@@ -438,8 +499,9 @@ export default function StudioPage() {
                   }`}
                 >
                   <span>{currentImage.is_favorite ? '❤️' : '🤍'}</span>
-                  {currentImage.is_favorite ? 'Favorited' : 'Favorite'}
+                  {currentImage.is_favorite ? t('studio.favorited') : t('studio.favorite')}
                 </button>
+                )}
 
                 <button
                   type="button"
@@ -447,7 +509,7 @@ export default function StudioPage() {
                   className="flex items-center gap-1.5 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-xl text-xs font-medium transition-colors"
                 >
                   <span>{copiedPrompt ? '✓' : '📋'}</span>
-                  {copiedPrompt ? 'Copied!' : 'Copy Prompt'}
+                  {copiedPrompt ? t('studio.copied') : t('studio.copyPrompt')}
                 </button>
 
                 <button
@@ -458,16 +520,16 @@ export default function StudioPage() {
                   }}
                   className="flex items-center gap-1.5 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-xl text-xs font-medium transition-colors"
                 >
-                  <span>🔄</span> Regenerate
+                  <span>🔄</span> {t('studio.regenerate')}
                 </button>
 
                 <a
                   href={currentImage.image_url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-xl text-xs font-medium transition-colors ml-auto"
+                  className="flex items-center gap-1.5 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-xl text-xs font-medium transition-colors ms-auto"
                 >
-                  <span>🔗</span> Full Size
+                  <span>🔗</span> {t('studio.fullSize')}
                 </a>
               </div>
 
@@ -476,13 +538,13 @@ export default function StudioPage() {
                 {currentImage.engine && (
                   <div className="flex items-center gap-2 pb-1">
                     <span className="px-2.5 py-1 rounded-lg bg-blue-950/50 border border-blue-800/40 text-blue-300 text-[11px] font-semibold">
-                      🎨 Generated with {currentImage.engine}
+                      {t('studio.generatedWith', { engine: currentImage.engine })}
                     </span>
                   </div>
                 )}
                 <div>
                   <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest block mb-1">
-                    Original Prompt
+                    {t('studio.originalPrompt')}
                   </span>
                   <p className="text-zinc-200 text-sm leading-relaxed">{currentImage.original_prompt}</p>
                 </div>
@@ -490,7 +552,7 @@ export default function StudioPage() {
                 {currentImage.enhanced_prompt && (
                   <div className="pt-2">
                     <span className="text-[10px] font-bold text-violet-400 uppercase tracking-widest block mb-1">
-                      ✨ AI Enhanced Prompt
+                      {t('studio.enhancedPrompt')}
                     </span>
                     <p className="text-zinc-400 text-xs leading-relaxed font-mono bg-zinc-950/60 p-3 rounded-xl border border-zinc-800">
                       {currentImage.enhanced_prompt}
@@ -508,14 +570,14 @@ export default function StudioPage() {
         <section className="border-t border-zinc-800/80 pt-10">
           <div className="flex items-center justify-between mb-6">
             <div>
-              <h2 className="text-xl font-bold text-white tracking-tight">Recent Generations</h2>
-              <p className="text-xs text-zinc-500 mt-0.5">Click any artwork to load it into the viewer</p>
+              <h2 className="text-xl font-bold text-white tracking-tight">{t('studio.recentTitle')}</h2>
+              <p className="text-xs text-zinc-500 mt-0.5">{t('studio.recentHint')}</p>
             </div>
             <Link
               href="/gallery"
               className="text-xs font-semibold text-blue-400 hover:text-blue-300 transition-colors"
             >
-              View Full Gallery ({history.length}) →
+              {t('studio.viewFullGallery', { count: history.length })}
             </Link>
           </div>
 
@@ -552,7 +614,7 @@ export default function StudioPage() {
               <span className="text-2xl">🔑</span>
               <div>
                 <h2 id="key-warning-title" className="text-base font-bold text-amber-300">
-                  Your API key couldn&apos;t be used
+                  {t('keyPopup.title')}
                 </h2>
                 <p className="text-sm text-zinc-300 leading-relaxed mt-2">{keyWarning}</p>
               </div>
@@ -562,14 +624,14 @@ export default function StudioPage() {
                 href="/settings"
                 className="px-4 py-2 rounded-xl text-sm font-semibold border border-zinc-700 text-zinc-300 hover:border-zinc-500 hover:text-white transition-all"
               >
-                Update key
+                {t('keyPopup.update')}
               </Link>
               <button
                 type="button"
                 onClick={() => setKeyWarning(null)}
                 className="px-4 py-2 rounded-xl text-sm font-semibold bg-amber-600 hover:bg-amber-500 text-white transition-all"
               >
-                OK
+                {t('common.ok')}
               </button>
             </div>
           </div>
