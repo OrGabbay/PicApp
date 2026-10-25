@@ -5,6 +5,7 @@ from pathlib import Path
 import jwt
 from dotenv import load_dotenv
 from pwdlib import PasswordHash
+from pwdlib.exceptions import UnknownHashError
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -23,7 +24,11 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, stored_hash: str) -> bool:
-    return password_hasher.verify(password, stored_hash)
+    try:
+        return password_hasher.verify(password, stored_hash)
+    except UnknownHashError:
+        # e.g. the demo user's placeholder hash: treat as a wrong password, not a server error
+        return False
 
 
 def create_access_token(user_id: int) -> str:
