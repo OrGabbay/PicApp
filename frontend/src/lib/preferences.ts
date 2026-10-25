@@ -6,6 +6,10 @@ export type Language = 'en' | 'he' | 'es' | 'fr';
 export type GallerySize = 'small' | 'medium' | 'large';
 export type GallerySort = 'newest' | 'oldest';
 export type GalleryLayout = 'grid' | 'masonry';
+export type ImageEngineId =
+  | 'free' | 'openai' | 'gemini' | 'gemini-pro' | 'flux'
+  | 'pollinations-klein' | 'pollinations-zimage' | 'pollinations-schnell' | 'pollinations-gptmini'
+  | 'cloudflare-schnell';
 
 export interface Preferences {
   theme: ThemePreference;
@@ -13,6 +17,8 @@ export interface Preferences {
   gallerySize: GallerySize;
   gallerySort: GallerySort;
   galleryLayout: GalleryLayout;
+  /** Image engine selected in the Studio */
+  engine: ImageEngineId;
 }
 
 export const DEFAULT_PREFERENCES: Preferences = {
@@ -21,6 +27,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   gallerySize: 'medium',
   gallerySort: 'newest',
   galleryLayout: 'grid',
+  engine: 'free',
 };
 
 export const RTL_LANGUAGES: Language[] = ['he'];

@@ -1,19 +1,19 @@
 import { NextResponse } from "next/server";
+import { BACKEND_URL, forwardedFor, isSameOrigin } from "@/src/lib/backend";
 
 export async function POST(request: Request) {
-  if (request.headers.get("origin") !== new URL(request.url).origin) {
+  if (!isSameOrigin(request)) {
     return NextResponse.json(
       { detail: "Invalid request origin" },
       { status: 403 }
     );
   }
 
-  const body = await request.json();
-
   try {
-    const response = await fetch("http://127.0.0.1:8000/auth/login", {
+    const body = await request.json();
+    const response = await fetch(`${BACKEND_URL}/auth/login`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...forwardedFor(request) },
       body: JSON.stringify(body),
       cache: "no-store",
     });
@@ -43,7 +43,11 @@ export async function POST(request: Request) {
 
     result.cookies.set("access_token", data.access_token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      // Secure whenever the page was loaded over HTTPS (directly or via a proxy); plain HTTP
+      // is only expected on localhost
+      secure:
+        new URL(request.url).protocol === "https:" ||
+        request.headers.get("x-forwarded-proto") === "https",
       sameSite: "lax",
       path: "/",
       maxAge: 30 * 60,

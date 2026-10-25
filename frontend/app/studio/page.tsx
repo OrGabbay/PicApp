@@ -7,15 +7,23 @@ import {
   getGenerationHistory,
   toggleFavorite,
   downloadImage,
-  detectProvider,
   AuthRequiredError,
+  EngineBusyError,
+  EngineUnavailableError,
 } from '@/src/lib/api';
 import { useCurrentUser } from '@/src/lib/useCurrentUser';
 import { useI18n, describeKeyIssue, translateServerMessage, type MessageKey } from '@/src/i18n';
 import ImageCard from '@/src/components/ImageCard';
+import EngineGateDialog from '@/src/components/EngineGateDialog';
+import { useStoredKeys } from '@/src/lib/keys';
+import { updatePreferences, usePreferences, type ImageEngineId } from '@/src/lib/preferences';
+import { ENGINES, PROVIDER_NAMES, getEngine, type EngineInfo } from '@/src/lib/engines';
 import type { GenerationItem, AspectRatio, ImageStyle } from '@/src/types/api';
 
 // Kept in English on purpose: these are sent to the image engine, which works best in English
+// The backend accepts up to 4000 (backend/schemas.py), leaving room for enhanced prompts
+const PROMPT_MAX_LENGTH = 2000;
+
 const INSPIRATION_PROMPTS = [
   'A majestic golden eagle soaring over snow-capped mountains at sunset',
   'Cyberpunk street vendor in neon-lit futuristic Tokyo alley in the rain',
@@ -45,8 +53,8 @@ const ASPECT_RATIOS: { value: AspectRatio; label: MessageKey; sub: string; iconW
 
 const GENERATION_STEPS: MessageKey[] = ['studio.step1', 'studio.step2', 'studio.step3', 'studio.step4'];
 
-// Marker for a key whose provider couldn't be detected (shown as "Custom AI Engine")
-const CUSTOM_ENGINE = 'custom';
+// Only called from event handlers and timers, never while rendering
+const clockNow = () => Date.now();
 
 export default function StudioPage() {
   const [prompt, setPrompt]                   = useState('');
@@ -59,33 +67,42 @@ export default function StudioPage() {
   const [imageLoaded, setImageLoaded]         = useState(false);
   const [history, setHistory]                 = useState<GenerationItem[]>([]);
   const [error, setError]                     = useState<string | null>(null);
-  const [activeEngineName, setActiveEngineName] = useState<string | null>(null);
   const [copiedPrompt, setCopiedPrompt]       = useState(false);
   const [keyWarning, setKeyWarning]           = useState<string | null>(null);
+  // When the free engine accepts a new image again (it allows about one per 45 s)
+  const [engineReadyAt, setEngineReadyAt]     = useState<number | null>(null);
+  // Only meaningful while waiting; set from the busy response (reading the clock during
+  // render is flagged by Cache Components)
+  const [now, setNow]                         = useState(0);
+  // Engine waiting for the user to log in / connect its key (shown in a popup)
+  const [gateEngine, setGateEngine]           = useState<EngineInfo | null>(null);
   const user = useCurrentUser();
   const { t, rich, language } = useI18n();
-  // The backend only uses API keys for logged-in users, so guests are always in free mode
-  const keyEngineName = user ? activeEngineName : null;
+  const storedKeys = useStoredKeys();
+  const engine = getEngine(usePreferences().engine);
 
-  // Check for saved API key and detect provider
-  useEffect(() => {
-    const key =
-      localStorage.getItem('ai_user_key') ||
-      localStorage.getItem('anthropic_user_key') ||
-      '';
+  /** Paid engines need a login (keys are a logged-in feature) and that provider's key. */
+  const isLocked = (e: EngineInfo) => e.provider !== null && (!user || !storedKeys.keys[e.provider]);
 
-    if (key.trim()) {
-      detectProvider(key.trim()).then((res) => {
-        if (res.provider !== 'unknown') {
-          setActiveEngineName(res.name);
-        } else {
-          setActiveEngineName(CUSTOM_ENGINE);
-        }
-      });
-    } else {
-      setActiveEngineName(null);
+  /** Dropdown text: name, Free/Paid (with price), and what's missing if it's locked. */
+  const engineOptionLabel = (e: EngineInfo) => {
+    const cost = e.tier === 'free'
+      ? t('studio.labelFree')
+      : `${t('studio.labelPaid')}${e.price ? ` · ${t('studio.perImage', { price: e.price })}` : ''}`;
+    const missing = isLocked(e) && e.provider
+      ? ` · ${t(e.tier === 'free' ? 'studio.needsFreeAccount' : 'studio.engineNeedsKey', { provider: PROVIDER_NAMES[e.provider] })}`
+      : '';
+    return `${isLocked(e) ? '🔒 ' : ''}${e.name} — ${cost}${missing}`;
+  };
+
+  const selectEngine = (id: string) => {
+    const next = getEngine(id);
+    if (isLocked(next)) {
+      setGateEngine(next);
+      return;
     }
-  }, []);
+    updatePreferences({ engine: next.id as ImageEngineId });
+  };
 
   // Recent generations come from the user's gallery, so they only exist when logged in
   useEffect(() => {
@@ -104,12 +121,24 @@ export default function StudioPage() {
   // Cycle animated loading status steps while generating
   useEffect(() => {
     if (!isGenerating) return;
-    setGenerationStep(0);
     const interval = setInterval(() => {
       setGenerationStep((prev) => (prev + 1) % GENERATION_STEPS.length);
     }, 2800);
     return () => clearInterval(interval);
   }, [isGenerating]);
+
+  // Tick once a second while waiting for the free engine, then clear the wait
+  useEffect(() => {
+    if (engineReadyAt === null) return;
+    const interval = setInterval(() => {
+      const current = clockNow();
+      setNow(current);
+      if (current >= engineReadyAt) setEngineReadyAt(null);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [engineReadyAt]);
+
+  const engineWait = engineReadyAt === null ? 0 : Math.max(0, Math.ceil((engineReadyAt - now) / 1000));
 
   const handleEnhance = async () => {
     if (!prompt.trim() || isEnhancing || isGenerating) return;
@@ -136,14 +165,20 @@ export default function StudioPage() {
   };
 
   const handleGenerate = async () => {
-    if (!prompt.trim() || isGenerating) return;
+    if (!prompt.trim() || isGenerating || (engine.id === 'free' && engineWait > 0)) return;
+    if (isLocked(engine)) {
+      setGateEngine(engine);
+      return;
+    }
 
     setIsGenerating(true);
+    setGenerationStep(0);
     setImageLoaded(false);
     setError(null);
 
     try {
       const newImage = await createGeneration({
+        engine: engine.id,
         prompt,
         aspect_ratio: aspectRatio,
         style: selectedStyle || undefined,
@@ -165,7 +200,19 @@ export default function StudioPage() {
         setHistory((prev) => [newImage, ...prev.filter((i) => i.id !== newImage.id).slice(0, 11)]);
       }
     } catch (err) {
-      if (err instanceof AuthRequiredError) {
+      // Generation failed, so show the previous image again
+      if (currentImage) setImageLoaded(true);
+      // The chosen engine's key failed and the free fallback couldn't help either: say why
+      if ((err instanceof EngineBusyError || err instanceof EngineUnavailableError) && err.keyIssue) {
+        setKeyWarning(describeKeyIssue(language, err.keyIssue, 'reason'));
+      }
+      if (err instanceof EngineBusyError) {
+        const current = clockNow();
+        setNow(current);
+        setEngineReadyAt(current + err.retryAfter * 1000);
+      } else if (err instanceof EngineUnavailableError) {
+        setError(t('studio.engineUnavailable'));
+      } else if (err instanceof AuthRequiredError) {
         setError(t('studio.sessionExpired'));
       } else {
         setError(err instanceof Error ? translateServerMessage(language, err.message) : t('studio.generationFailed'));
@@ -214,15 +261,13 @@ export default function StudioPage() {
         <Link
           href="/settings"
           className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-            keyEngineName
+            engine.id !== 'free'
               ? 'bg-blue-950/40 border-blue-700/50 text-blue-300 hover:bg-blue-900/40'
               : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700'
           }`}
         >
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          {keyEngineName
-            ? t('studio.engineActive', { engine: keyEngineName === CUSTOM_ENGINE ? t('studio.customEngine') : keyEngineName })
-            : t('studio.freeMode')}
+          {engine.id !== 'free' ? t('studio.engineActive', { engine: engine.name }) : t('studio.freeMode')}
         </Link>
       </div>
 
@@ -257,6 +302,7 @@ export default function StudioPage() {
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
+              maxLength={PROMPT_MAX_LENGTH}
               placeholder={t('studio.placeholder')}
               rows={4}
               className="w-full bg-transparent text-white placeholder:text-zinc-600 focus:outline-none resize-none text-sm leading-relaxed"
@@ -333,7 +379,7 @@ export default function StudioPage() {
               {t('studio.aspectRatio')}
             </label>
             <div className="grid grid-cols-4 gap-2">
-              {ASPECT_RATIOS.map(({ value, label, sub, iconW, iconH }) => (
+              {ASPECT_RATIOS.map(({ value, label, iconW, iconH }) => (
                 <button
                   key={value}
                   type="button"
@@ -359,6 +405,50 @@ export default function StudioPage() {
             </div>
           </div>
 
+          {/* Image engine picker */}
+          <div className="bg-zinc-900/90 border border-zinc-800 rounded-3xl p-5">
+            <label htmlFor="engine-select" className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">
+              {t('studio.engineLabel')}
+            </label>
+            <select
+              id="engine-select"
+              value={engine.id}
+              onChange={(e) => selectEngine(e.target.value)}
+              aria-describedby="engine-hint"
+              className="w-full bg-zinc-950 text-white text-sm px-3.5 py-2.5 rounded-2xl border border-zinc-700/80 focus:outline-none focus:border-blue-500 transition-colors"
+            >
+              {(['free', 'paid'] as const).map((tier) => (
+                <optgroup key={tier} label={tier === 'free' ? t('studio.engineGroupFree') : t('studio.engineGroupPaid')}>
+                  {ENGINES.filter((e) => e.tier === tier).map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {engineOptionLabel(e)}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <p id="engine-hint" className="text-[11px] text-zinc-500 mt-2 leading-relaxed">
+              <span
+                className={`inline-block me-1.5 px-1.5 py-0.5 rounded-md border text-[10px] font-bold uppercase tracking-wide align-middle ${
+                  engine.tier === 'free'
+                    ? 'bg-emerald-600/20 border-emerald-500/40 text-emerald-300'
+                    : 'bg-amber-600/20 border-amber-500/40 text-amber-300'
+                }`}
+              >
+                {engine.tier === 'free' ? t('studio.labelFree') : t('studio.labelPaid')}
+              </span>
+              {t(engine.description)}
+              {engine.provider && (
+                <>
+                  {' · '}
+                  {engine.price
+                    ? t('studio.engineCost', { price: engine.price, provider: PROVIDER_NAMES[engine.provider] })
+                    : t('studio.engineFreeWith', { provider: PROVIDER_NAMES[engine.provider] })}
+                </>
+              )}
+            </p>
+          </div>
+
           {/* Guest notice: generating works, but nothing is saved */}
           {user === null && (
             <div className="flex items-start gap-3 bg-amber-950/30 border border-amber-800/50 rounded-2xl p-4">
@@ -380,6 +470,14 @@ export default function StudioPage() {
             </div>
           )}
 
+          {/* Free engine busy: countdown until the next image is possible */}
+          {engineWait > 0 && (
+            <div role="status" className="flex items-start gap-3 bg-blue-950/40 border border-blue-800/60 rounded-2xl p-4">
+              <span className="text-blue-400 text-lg">⏳</span>
+              <p className="text-xs text-blue-200 leading-relaxed">{t('studio.engineBusy', { seconds: engineWait })}</p>
+            </div>
+          )}
+
           {/* Error Message */}
           {error && (
             <div className="flex items-start gap-3 bg-rose-950/40 border border-rose-800/60 rounded-2xl p-4">
@@ -392,9 +490,9 @@ export default function StudioPage() {
           <button
             type="button"
             onClick={handleGenerate}
-            disabled={isGenerating || !prompt.trim()}
+            disabled={isGenerating || !prompt.trim() || (engine.id === 'free' && engineWait > 0)}
             className={`w-full py-4 rounded-2xl font-bold flex items-center justify-center gap-3 text-base shadow-xl transition-all duration-200 ${
-              isGenerating || !prompt.trim()
+              isGenerating || !prompt.trim() || (engine.id === 'free' && engineWait > 0)
                 ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
                 : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-blue-900/30 active:scale-[0.98]'
             }`}
@@ -409,7 +507,7 @@ export default function StudioPage() {
               </>
             ) : (
               <>
-                <span>{t('studio.generate')}</span>
+                <span>{engine.id === 'free' && engineWait > 0 ? t('studio.engineReadyIn', { seconds: engineWait }) : t('studio.generate')}</span>
               </>
             )}
           </button>
@@ -597,6 +695,8 @@ export default function StudioPage() {
           </div>
         </section>
       )}
+
+      <EngineGateDialog engine={gateEngine} loggedIn={!!user} onClose={() => setGateEngine(null)} />
 
       {/* API Key Warning Popup */}
       {keyWarning && (

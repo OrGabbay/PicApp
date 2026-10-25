@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 import models
 from database import get_db
-from security import SECRET_KEY, ALGORITHM
+from security import SECRET_KEY, ALGORITHM, is_token_revoked
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -21,27 +21,42 @@ def _auth_error() -> HTTPException:
     )
 
 
+def _decode(token: str) -> dict:
+    try:
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            options={"require": ["sub", "exp", "jti"]},
+        )
+        int(payload["sub"])
+    except (InvalidTokenError, ValueError, TypeError):
+        raise _auth_error()
+    if is_token_revoked(payload["jti"]):
+        raise _auth_error()
+    return payload
+
+
+def get_token_payload(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> dict:
+    """The verified claims of the request's token (401 if missing, invalid or revoked)."""
+    if credentials is None:
+        raise _auth_error()
+    return _decode(credentials.credentials)
+
+
 def get_optional_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> Optional[models.User]:
-    """Returns the logged-in user, or None for guests. A token that is present but invalid
-    or expired is still rejected, so the client can tell the user their session ended."""
+    """Returns the logged-in user, or None for guests. A token that is present but invalid,
+    expired or revoked is still rejected, so the client can tell the user their session ended."""
     if credentials is None:
         return None
 
-    try:
-        payload = jwt.decode(
-            credentials.credentials,
-            SECRET_KEY,
-            algorithms=[ALGORITHM],
-            options={"require": ["sub", "exp"]},
-        )
-        user_id = int(payload["sub"])
-    except (InvalidTokenError, ValueError, TypeError):
-        raise _auth_error()
-
-    user = db.get(models.User, user_id)
+    payload = _decode(credentials.credentials)
+    user = db.get(models.User, int(payload["sub"]))
 
     if user is None:
         raise _auth_error()

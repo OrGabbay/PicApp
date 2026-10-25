@@ -1,16 +1,45 @@
 'use client';
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { getUserStats } from '@/src/lib/api';
+import { clearStoredApiKey, deleteAccount, getUserStats } from '@/src/lib/api';
+import ConfirmDialog from '@/src/components/ConfirmDialog';
 import { useCurrentUser } from '@/src/lib/useCurrentUser';
-import { useI18n } from '@/src/i18n';
+import { useI18n, translateServerMessage } from '@/src/i18n';
 import type { UserStats } from '@/src/types/api';
 
 export default function ProfilePage() {
   const [stats, setStats]     = useState<UserStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [deleteOpen, setDeleteOpen]         = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [deleteError, setDeleteError]       = useState('');
+  const [deleting, setDeleting]             = useState(false);
   const user = useCurrentUser();
-  const { t, formatDate } = useI18n();
+  const { t, formatDate, language } = useI18n();
+
+  const closeDelete = () => {
+    setDeleteOpen(false);
+    setDeletePassword('');
+    setDeleteError('');
+  };
+
+  const confirmDelete = async () => {
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      const error = await deleteAccount(deletePassword);
+      if (error) {
+        setDeleteError(translateServerMessage(language, error));
+        return;
+      }
+      clearStoredApiKey();
+      window.location.assign('/');
+    } catch {
+      setDeleteError(t('auth.genericError'));
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -147,6 +176,45 @@ export default function ProfilePage() {
           </div>
         </Link>
       </div>
+
+      {/* Delete account */}
+      <div className="mt-10 pt-6 border-t border-zinc-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h2 className="text-white font-semibold text-sm">{t('profile.deleteTitle')}</h2>
+          <p className="text-zinc-500 text-xs mt-0.5">{t('profile.deleteText')}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setDeleteOpen(true)}
+          className="px-4 py-2 rounded-xl text-xs font-semibold border border-rose-800/60 text-rose-400 hover:bg-rose-600 hover:text-white hover:border-rose-600 transition-colors shrink-0"
+        >
+          {t('profile.deleteButton')}
+        </button>
+      </div>
+
+      <ConfirmDialog
+        open={deleteOpen}
+        title={t('profile.deleteConfirmTitle')}
+        message={t('profile.deleteConfirmText')}
+        confirmLabel={t('profile.deleteConfirm')}
+        cancelLabel={t('gallery.cancel')}
+        busy={deleting}
+        busyLabel={t('profile.deleting')}
+        confirmDisabled={!deletePassword}
+        onConfirm={confirmDelete}
+        onCancel={closeDelete}
+      >
+        <input
+          type="password"
+          autoComplete="current-password"
+          aria-label={t('auth.password')}
+          placeholder={t('auth.password')}
+          value={deletePassword}
+          onChange={(e) => setDeletePassword(e.target.value)}
+          className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-rose-500"
+        />
+        {deleteError && <p role="alert" className="text-rose-400 text-xs mt-2">{deleteError}</p>}
+      </ConfirmDialog>
     </div>
   );
 }

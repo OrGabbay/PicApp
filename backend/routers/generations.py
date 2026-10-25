@@ -1,16 +1,16 @@
 # backend/routers/generations.py
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session, joinedload
 
 import models
 import schemas
 import providers
 from auth import get_current_user, get_optional_user
+from rate_limit import client_ip, enhance_limiter, guest_generation_limiter, user_generation_limiter
 from database import get_db
 
 logger = logging.getLogger(__name__)
@@ -26,22 +26,13 @@ def resolve_api_key(
     header_api_key: Optional[str],
     header_anthropic_key: Optional[str]
 ) -> Optional[str]:
-    """Resolves API key from headers or server environment variables.
-    API keys are a logged-in feature: guests always get the free engine."""
+    """Resolves the user's own API key from the request headers.
+    API keys are a logged-in feature: guests always get the free engine. There is deliberately
+    no fallback to a server key: registration is open, so anyone could spend it."""
     if user is None:
         return None
-    key = header_api_key or header_anthropic_key
-    if not key:
-        key = (
-            os.getenv("AI_API_KEY")
-            or os.getenv("GEMINI_API_KEY")
-            or os.getenv("ANTHROPIC_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-            or os.getenv("GROQ_API_KEY")
-        )
-    if key and key != "sk-ant-your-actual-api-key-here":
-        return key.strip()
-    return None
+    key = (header_api_key or header_anthropic_key or "").strip()
+    return key or None
 
 
 def key_issue_fields(issue: Optional[providers.KeyIssue]) -> dict:
@@ -70,6 +61,7 @@ def detect_provider_endpoint(payload: schemas.DetectProviderIn):
 
 @router.post("/prompts/enhance", response_model=schemas.EnhancePromptOut)
 def enhance_prompt(
+    http_request: Request,
     payload: schemas.EnhancePromptIn,
     x_api_key: Optional[str] = Header(None, description="Universal AI API Key"),
     x_anthropic_key: Optional[str] = Header(None, description="Anthropic API Key (backward compat)"),
@@ -82,6 +74,7 @@ def enhance_prompt(
     """
     if not payload.prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
+    enhance_limiter.check_and_hit(client_ip(http_request))
 
     api_key = resolve_api_key(user, x_api_key, x_anthropic_key)
     enhanced_prompt = None
@@ -115,37 +108,60 @@ def enhance_prompt(
 
 @router.post("/generations/create", response_model=schemas.GenerationOut)
 def create_generation(
-    request: schemas.GenerateImageRequest,
-    x_api_key: Optional[str] = Header(None, description="Universal AI API Key"),
+    http_request: Request,
+    payload: schemas.GenerateImageRequest,
+    x_api_key: Optional[str] = Header(None, description="Key used to enhance prompts for the free engine"),
     x_anthropic_key: Optional[str] = Header(None, description="Anthropic API Key (backward compat)"),
-    x_provider: Optional[str] = Header(None, description="Explicit provider name (optional)"),
+    x_provider: Optional[str] = Header(None, description="Provider of x-api-key (optional)"),
+    x_image_key: Optional[str] = Header(None, description="Key for the chosen paid image engine"),
     db: Session = Depends(get_db),
     user: Optional[models.User] = Depends(get_optional_user),
 ):
     """
-    Generates an image from prompt. The result is saved to the gallery only for logged-in
-    users; guests get the image back with saved=False.
-    - If a Gemini key is inserted: Generates natively with Google Imagen 3 (imagen-3.0-generate-002)
-    - If an OpenAI key is inserted: Generates natively with OpenAI DALL-E 3 (dall-e-3)
-    - If an Anthropic key is inserted: Enhances with Claude 3.5 Sonnet + renders high-res FLUX
-    - If a Groq key is inserted: Enhances with Groq Llama 3.3 + renders high-res FLUX
-    - If no key is inserted: Uses default fast AI generation (free mode)
+    Generates an image with the engine chosen in `payload.engine` ("free", "openai", "gemini",
+    "gemini-pro" or "flux"). Paid engines use the caller's own key (x-image-key); keys are a
+    logged-in feature, so guests always get the free engine. The result is saved to the
+    gallery only for logged-in users; guests get the image back with saved=False.
     """
-    clean_prompt = request.prompt.strip()
+    clean_prompt = payload.prompt.strip()
     if not clean_prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
+    if user is None:
+        guest_generation_limiter.check_and_hit(client_ip(http_request))
+    else:
+        user_generation_limiter.check_and_hit(f"user:{user.id}")
 
-    api_key = resolve_api_key(user, x_api_key, x_anthropic_key)
-    chosen_provider = request.provider or x_provider
+    enhancer_key = resolve_api_key(user, x_api_key, x_anthropic_key)
+    image_key = x_image_key if user is not None else None
+    engine = payload.engine if user is not None else providers.FREE_ENGINE
 
-    # Generate image using provider's native model
-    image_url, enhanced_prompt, engine_name, key_issue = providers.generate_image_with_provider(
-        prompt=clean_prompt,
-        key=api_key,
-        aspect_ratio=request.aspect_ratio or "1:1",
-        style=request.style,
-        provider=chosen_provider,
-    )
+    try:
+        image_url, enhanced_prompt, engine_name, key_issue = providers.generate_image(
+            prompt=clean_prompt,
+            engine=engine,
+            image_key=image_key,
+            enhancer_key=enhancer_key,
+            enhancer_provider=payload.provider or x_provider,
+            aspect_ratio=payload.aspect_ratio or "1:1",
+            style=payload.style,
+            guest=user is None,
+        )
+    except providers.FreeEngineBusy as exc:
+        # Structured detail so the frontend can show a translated countdown (and, if the free
+        # engine was only a fallback, why the chosen engine failed)
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "engine_busy", "retry_after": exc.retry_after, "message": str(exc),
+                    **key_issue_fields(exc.key_issue)},
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+    except providers.FreeEngineError as exc:
+        logger.warning("Free image engine failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "engine_unavailable", "message": "The free image engine is unavailable right now.",
+                    **key_issue_fields(exc.key_issue)},
+        )
 
     if user is None:
         return schemas.GenerationOut(

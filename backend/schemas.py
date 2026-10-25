@@ -1,16 +1,72 @@
 # backend/schemas.py
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional, List
 from datetime import datetime
 
+# Password rules, shared with the register form (frontend/app/register/page.tsx).
+# The upper bound keeps a huge password from tying up the (deliberately slow) argon2 hasher.
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 128
+
+# Prompt limits. The Studio textarea allows 2000 characters (frontend/app/studio/page.tsx);
+# the extra room is for an enhanced prompt (LLM rewrite or style preset) sent back as the prompt.
+PROMPT_MAX_LENGTH = 4000
+SHORT_FIELD_MAX_LENGTH = 50  # style and provider names
+API_KEY_MAX_LENGTH = 512
+ASPECT_RATIO_PATTERN = r"^(1:1|16:9|9:16|4:3)$"  # providers.ASPECT_RATIO_SIZES
+
 # --- Auth Schemas ---
+def _normalize_email(value: str) -> str:
+    # Emails are case-insensitive in practice: store and look them up in lowercase
+    return value.lower()
+
+def _check_password_strength(value: str) -> str:
+    if not any(c.isalpha() for c in value) or not any(c.isdigit() for c in value):
+        raise ValueError("Password must contain at least one letter and one number")
+    return value
+
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, value: str) -> str:
+        return _check_password_strength(value)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return _normalize_email(value)
 
 class UserLogin(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(max_length=PASSWORD_MAX_LENGTH)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return _normalize_email(value)
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return _normalize_email(value)
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, value: str) -> str:
+        return _check_password_strength(value)
+
+class DeleteAccountIn(BaseModel):
+    password: str = Field(max_length=PASSWORD_MAX_LENGTH)
 
 class UserOut(BaseModel):
     id: int
@@ -27,9 +83,9 @@ class TokenResponse(BaseModel):
 
 # --- Prompt & Generation Schemas ---
 class EnhancePromptIn(BaseModel):
-    prompt: str
-    style: Optional[str] = None
-    provider: Optional[str] = None
+    prompt: str = Field(max_length=PROMPT_MAX_LENGTH)
+    style: Optional[str] = Field(default=None, max_length=SHORT_FIELD_MAX_LENGTH)
+    provider: Optional[str] = Field(default=None, max_length=SHORT_FIELD_MAX_LENGTH)
 
 class EnhancePromptOut(BaseModel):
     original_prompt: str
@@ -42,7 +98,7 @@ class EnhancePromptOut(BaseModel):
     error_provider: Optional[str] = None
 
 class DetectProviderIn(BaseModel):
-    key: str
+    key: str = Field(max_length=API_KEY_MAX_LENGTH)
 
 class DetectProviderOut(BaseModel):
     provider: str
@@ -50,10 +106,15 @@ class DetectProviderOut(BaseModel):
 
 class GenerateImageRequest(BaseModel):
     """Request body for POST /generations/create."""
-    prompt: str
-    aspect_ratio: Optional[str] = "1:1"
-    style: Optional[str] = None
-    provider: Optional[str] = None
+    prompt: str = Field(max_length=PROMPT_MAX_LENGTH)
+    aspect_ratio: Optional[str] = Field(default="1:1", pattern=ASPECT_RATIO_PATTERN)
+    style: Optional[str] = Field(default=None, max_length=SHORT_FIELD_MAX_LENGTH)
+    provider: Optional[str] = Field(default=None, max_length=SHORT_FIELD_MAX_LENGTH)
+    # Image engine chosen in the Studio (see providers.IMAGE_ENGINES)
+    engine: str = Field(
+        default="free",
+        pattern="^(free|openai|gemini|gemini-pro|flux|pollinations-(klein|zimage|schnell|gptmini)|cloudflare-schnell)$",
+    )
 
 class GenerationOut(BaseModel):
     # id / prompt_id are None for guest generations, which are not saved

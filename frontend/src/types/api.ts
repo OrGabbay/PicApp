@@ -45,6 +45,8 @@ export interface CreateGenerationRequest {
   aspect_ratio?: AspectRatio;
   style?: string;
   provider?: string;
+  /** Image engine chosen in the Studio (see src/lib/engines.ts) */
+  engine?: string;
 }
 
 export interface CurrentUser {
