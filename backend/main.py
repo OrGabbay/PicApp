@@ -8,7 +8,7 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -24,7 +24,7 @@ from security import (
     create_access_token,
     revoke_token,
 )
-from rate_limit import client_ip, login_failure_limiter, login_ip_limiter, register_limiter
+from rate_limit import client_ip, login_account_limiter, login_failure_limiter, login_ip_limiter, register_limiter
 
 # Ensure static storage directory exists for saved generated images
 STATIC_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -99,28 +99,37 @@ def login(
     db: Session = Depends(get_db),
 ):
     ip = client_ip(request)
-    # Keyed on the account, not the IP, so changing (or faking) the IP doesn't reset the count
-    failure_key = str(credentials.email).lower()
+    email = str(credentials.email)
+    # Wrong passwords are counted per account + IP, so one attacker can't lock the real user out
+    # of their own IP, and per account from any IP with a looser limit, so guessing spread over
+    # many IPs is still stopped
+    failure_key = f"{email}|{ip}"
     login_ip_limiter.check_and_hit(ip)
     login_failure_limiter.check(failure_key)
+    login_account_limiter.check(email)
+
+    def record_failure() -> None:
+        login_failure_limiter.hit(failure_key)
+        login_account_limiter.hit(email)
 
     user = (
         db.query(models.User)
-        .filter(models.User.email == str(credentials.email))
+        # lower(): accounts created before emails were normalized may contain capitals
+        .filter(func.lower(models.User.email) == email)
         .first()
     )
 
     if user is None:
         # Run a hash check anyway so response time doesn't reveal whether the email exists
         verify_password_dummy(credentials.password)
-        login_failure_limiter.hit(failure_key)
+        record_failure()
         raise HTTPException(
             status_code=401,
             detail="Incorrect email or password",
         )
 
     if not verify_password(credentials.password, user.password_hash):
-        login_failure_limiter.hit(failure_key)
+        record_failure()
         raise HTTPException(
             status_code=401,
             detail="Incorrect email or password",
@@ -158,7 +167,7 @@ def register(
     register_limiter.check_and_hit(client_ip(request))
     existing_user = (
         db.query(models.User)
-        .filter(models.User.email == str(user_data.email))
+        .filter(func.lower(models.User.email) == str(user_data.email))
         .first()
     )
 

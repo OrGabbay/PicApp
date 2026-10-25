@@ -351,7 +351,7 @@ def enhance_with_provider(
     # 3. Google Gemini (REST: supports AIza... and AQ... keys)
     elif chosen_provider == "gemini":
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_TEXT_MODEL}:generateContent?key={clean_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_TEXT_MODEL}:generateContent"
             payload = {
                 "contents": [
                     {
@@ -365,7 +365,8 @@ def enhance_with_provider(
             req = urllib.request.Request(
                 url,
                 data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                # Key in a header, not the URL, so it can't end up in proxy or access logs
+                headers={"Content-Type": "application/json", "x-goog-api-key": clean_key},
             )
             with urllib.request.urlopen(req, timeout=12) as response:
                 data = json.loads(response.read().decode("utf-8"))

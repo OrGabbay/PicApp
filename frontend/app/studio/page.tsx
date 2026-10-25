@@ -21,6 +21,9 @@ import { ENGINES, PROVIDER_NAMES, getEngine, type EngineInfo } from '@/src/lib/e
 import type { GenerationItem, AspectRatio, ImageStyle } from '@/src/types/api';
 
 // Kept in English on purpose: these are sent to the image engine, which works best in English
+// The backend accepts up to 4000 (backend/schemas.py), leaving room for enhanced prompts
+const PROMPT_MAX_LENGTH = 2000;
+
 const INSPIRATION_PROMPTS = [
   'A majestic golden eagle soaring over snow-capped mountains at sunset',
   'Cyberpunk street vendor in neon-lit futuristic Tokyo alley in the rain',
@@ -299,6 +302,7 @@ export default function StudioPage() {
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
+              maxLength={PROMPT_MAX_LENGTH}
               placeholder={t('studio.placeholder')}
               rows={4}
               className="w-full bg-transparent text-white placeholder:text-zinc-600 focus:outline-none resize-none text-sm leading-relaxed"

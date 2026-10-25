@@ -71,7 +71,8 @@ class RateLimiter:
 
 # Limits per endpoint
 login_ip_limiter = RateLimiter(limit=20, window=5 * 60)          # all login attempts per IP
-login_failure_limiter = RateLimiter(limit=5, window=15 * 60)     # wrong passwords per account
+login_failure_limiter = RateLimiter(limit=5, window=15 * 60)     # wrong passwords per account + IP
+login_account_limiter = RateLimiter(limit=50, window=60 * 60)    # wrong passwords per account, any IP
 register_limiter = RateLimiter(limit=5, window=60 * 60)          # new accounts per IP
 guest_generation_limiter = RateLimiter(limit=5, window=60)       # guest images per IP
 user_generation_limiter = RateLimiter(limit=15, window=60)       # images per logged-in user

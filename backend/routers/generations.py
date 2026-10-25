@@ -1,6 +1,5 @@
 # backend/routers/generations.py
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -27,22 +26,13 @@ def resolve_api_key(
     header_api_key: Optional[str],
     header_anthropic_key: Optional[str]
 ) -> Optional[str]:
-    """Resolves API key from headers or server environment variables.
-    API keys are a logged-in feature: guests always get the free engine."""
+    """Resolves the user's own API key from the request headers.
+    API keys are a logged-in feature: guests always get the free engine. There is deliberately
+    no fallback to a server key: registration is open, so anyone could spend it."""
     if user is None:
         return None
-    key = header_api_key or header_anthropic_key
-    if not key:
-        key = (
-            os.getenv("AI_API_KEY")
-            or os.getenv("GEMINI_API_KEY")
-            or os.getenv("ANTHROPIC_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-            or os.getenv("GROQ_API_KEY")
-        )
-    if key and key != "sk-ant-your-actual-api-key-here":
-        return key.strip()
-    return None
+    key = (header_api_key or header_anthropic_key or "").strip()
+    return key or None
 
 
 def key_issue_fields(issue: Optional[providers.KeyIssue]) -> dict:

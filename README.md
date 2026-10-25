@@ -49,7 +49,6 @@ cp .env.example .env
 # Edit .env:
 #  - JWT_SECRET_KEY (required): generate one with
 #      python -c "import secrets; print(secrets.token_urlsafe(48))"
-#  - ANTHROPIC_API_KEY: your API key, or leave it empty to use free mode
 #  - DATABASE_URL: the default matches docker-compose.yml
 
 # Start the API server
@@ -103,7 +102,7 @@ Pick the image engine from the **Image Engine** dropdown in the Studio. Paid eng
 | Google Nano Banana Pro | `gemini-3-pro-image` (`GEMINI_PRO_IMAGE_MODEL`) | Google AI Studio key | $0.13 |
 | FLUX.2 Pro | `flux-2-pro-preview` (`FLUX_MODEL`) | Black Forest Labs key | $0.03 |
 
-**Prompt enhancement** (the *Enhance Prompt* button, and generations with the free engine) uses one connected key — Anthropic, OpenAI, Google or Groq — chosen under *Settings → Prompt enhancement* (default: automatic). Paid image engines get the prompt as written, since they understand prompts well.
+**Prompt enhancement** (the *Enhance Prompt* button, and generations with the free engine) uses one connected key — Anthropic, OpenAI, Google or Groq — chosen under *Settings → Prompt enhancement* (default: automatic). Keys always come from the user: the server never uses a key of its own, so open registration can't run up your bill. Paid image engines get the prompt as written, since they understand prompts well.
 
 If a key can't be used (invalid, expired, out of credits, rate-limited…), the Studio shows a popup with the reason and the image is generated with the free engine instead.
 
@@ -236,7 +235,7 @@ PicApp/
 - Change the database password: set `POSTGRES_PASSWORD` in a `.env` file next to `docker-compose.yml` and update `DATABASE_URL` in `backend/.env`.
 - Serve everything over HTTPS (secure cookies and HSTS turn on automatically in production builds).
 - Set `PUBLIC_BACKEND_URL` and `CORS_ORIGINS` (backend) and `BACKEND_URL` / `PUBLIC_BACKEND_URL` (frontend) to your real addresses.
-- Per-IP rate limits need the visitor's real IP: put Next.js behind a reverse proxy that overwrites `X-Forwarded-For` and set `TRUST_PROXY_HEADERS=true`. Without it, per-IP limits count all traffic together (the per-account login limit works either way).
+- Per-IP rate limits need the visitor's real IP: put Next.js behind a reverse proxy that overwrites `X-Forwarded-For` and set `TRUST_PROXY_HEADERS=true`. Without it, per-IP limits count all traffic together, and the login lockout can't tell an attacker's IP from the real user's (the frontend logs a warning at startup in production).
 - Rate limits and revoked tokens live in memory, so they reset on restart and assume a single backend process.
 
 **Good to know:** a key saved in **Settings** is stored in the browser's `localStorage` (protected by the CSP, removed on logout). Images saved by the backend go to `backend/static/` (git-ignored) and are public to anyone who has their unguessable URL.
