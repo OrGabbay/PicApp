@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -9,6 +9,10 @@ interface ConfirmDialogProps {
   cancelLabel: string;
   busy?: boolean;
   busyLabel?: string;
+  /** Keeps the confirm button disabled, e.g. until a required field is filled in */
+  confirmDisabled?: boolean;
+  /** Extra content under the message, such as a password field */
+  children?: ReactNode;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -22,6 +26,8 @@ export default function ConfirmDialog({
   cancelLabel,
   busy = false,
   busyLabel,
+  confirmDisabled = false,
+  children,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -60,6 +66,7 @@ export default function ConfirmDialog({
             <p id="confirm-message" className="text-sm text-zinc-400 leading-relaxed mt-1.5">{message}</p>
           </div>
         </div>
+        {children && <div className="mb-5">{children}</div>}
         <div className="flex justify-end gap-3">
           <button
             ref={cancelRef}
@@ -73,7 +80,7 @@ export default function ConfirmDialog({
           <button
             type="button"
             onClick={onConfirm}
-            disabled={busy}
+            disabled={busy || confirmDisabled}
             className="px-4 py-2 rounded-xl text-sm font-semibold bg-rose-600 hover:bg-rose-500 text-white transition-all disabled:opacity-60 flex items-center gap-2"
           >
             {busy && <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />}

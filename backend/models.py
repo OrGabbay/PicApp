@@ -14,6 +14,7 @@ class User(Base):
     prompts = relationship("Prompt", back_populates="owner", cascade="all, delete-orphan")
     generations = relationship("Generation", back_populates="owner", cascade="all, delete-orphan")
     favorites = relationship("Favorite", back_populates="user", cascade="all, delete-orphan")
+    reset_tokens = relationship("PasswordResetToken", cascade="all, delete-orphan")
 
 class Prompt(Base):
     __tablename__ = "prompts"
@@ -52,3 +53,13 @@ class Favorite(Base):
 
     user = relationship("User", back_populates="favorites")
     generation = relationship("Generation", back_populates="favorited_by")
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # SHA-256 of the token: the token itself is only in the emailed link
+    token_hash = Column(String(64), unique=True, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

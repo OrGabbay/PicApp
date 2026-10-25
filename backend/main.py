@@ -1,11 +1,14 @@
+import hashlib
 import os
+import secrets
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 # Load backend/.env before importing modules that read env vars at import time
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, text
@@ -13,7 +16,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from routers import generations
+import mailer
 import models
+import providers
 import schemas
 from auth import get_current_user, get_token_payload
 from database import engine, SessionLocal, get_db
@@ -24,7 +29,15 @@ from security import (
     create_access_token,
     revoke_token,
 )
-from rate_limit import client_ip, login_account_limiter, login_failure_limiter, login_ip_limiter, register_limiter
+from rate_limit import (
+    client_ip,
+    login_account_limiter,
+    login_failure_limiter,
+    login_ip_limiter,
+    register_limiter,
+    reset_email_limiter,
+    reset_ip_limiter,
+)
 
 # Ensure static storage directory exists for saved generated images
 STATIC_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -195,3 +208,97 @@ def register(
 
     db.refresh(new_user)
     return new_user
+
+
+RESET_TOKEN_MINUTES = 30
+INVALID_RESET_LINK = "Invalid or expired reset link"
+
+
+def _hash_reset_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+@app.post("/auth/password-reset/request", status_code=202)
+def request_password_reset(
+    payload: schemas.PasswordResetRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Emails a reset link if the account exists. The answer is the same either way, so it
+    doesn't reveal which emails are registered."""
+    reset_ip_limiter.check_and_hit(client_ip(request))
+    email = str(payload.email)
+    answer = {"detail": "If an account exists for that email, a reset link has been sent."}
+
+    user = db.query(models.User).filter(func.lower(models.User.email) == email).first()
+    if user is None or reset_email_limiter.retry_after(email):
+        return answer
+    reset_email_limiter.hit(email)
+
+    # Only the newest link works
+    db.query(models.PasswordResetToken).filter(models.PasswordResetToken.user_id == user.id).delete()
+    token = secrets.token_urlsafe(32)
+    db.add(models.PasswordResetToken(
+        user_id=user.id,
+        token_hash=_hash_reset_token(token),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=RESET_TOKEN_MINUTES),
+    ))
+    db.commit()
+
+    # Sent after the response, so its timing doesn't reveal that the account exists either
+    background_tasks.add_task(mailer.send_password_reset, user.email, token, RESET_TOKEN_MINUTES)
+    return answer
+
+
+@app.post("/auth/password-reset/confirm", status_code=204)
+def confirm_password_reset(
+    payload: schemas.PasswordResetConfirm,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    reset_ip_limiter.check_and_hit(client_ip(request))
+    reset = (
+        db.query(models.PasswordResetToken)
+        .filter(models.PasswordResetToken.token_hash == _hash_reset_token(payload.token))
+        .first()
+    )
+    if reset is None or reset.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail=INVALID_RESET_LINK)
+
+    user = db.get(models.User, reset.user_id)
+    user.password_hash = hash_password(payload.password)
+    # The link is single-use
+    db.query(models.PasswordResetToken).filter(models.PasswordResetToken.user_id == user.id).delete()
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.post("/auth/delete-account", status_code=204)
+def delete_account(
+    payload: schemas.DeleteAccountIn,
+    request: Request,
+    token: dict = Depends(get_token_payload),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Permanently deletes the account with its prompts, generations, favorites and image files.
+    Asks for the password again, so a session left open on a shared computer isn't enough."""
+    email = current_user.email.lower()
+    failure_key = f"{email}|{client_ip(request)}"
+    login_failure_limiter.check(failure_key)
+    login_account_limiter.check(email)
+
+    if not verify_password(payload.password, current_user.password_hash):
+        login_failure_limiter.hit(failure_key)
+        login_account_limiter.hit(email)
+        raise HTTPException(status_code=403, detail="Incorrect password")
+
+    image_urls = [generation.image_url for generation in current_user.generations]
+    db.delete(current_user)
+    db.commit()
+    # Remove the files only once the database change succeeded
+    for image_url in image_urls:
+        providers.delete_saved_image(image_url)
+    revoke_token(token["jti"], token["exp"])
+    return Response(status_code=204)

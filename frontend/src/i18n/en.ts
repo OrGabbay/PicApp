@@ -208,6 +208,14 @@ const en = {
   'profile.browseGalleryHint': 'View your full portfolio and favorites',
   'profile.loginTitle': 'Log in to see your profile',
   'profile.loginText': "Your profile shows how many images you've created and favorited.",
+  'profile.deleteTitle': 'Delete account',
+  'profile.deleteText': 'Permanently delete your account with all your images and favorites. This cannot be undone.',
+  'profile.deleteButton': 'Delete my account',
+  'profile.deleteConfirmTitle': 'Delete your account?',
+  'profile.deleteConfirmText': 'All your images and favorites will be deleted for good. Enter your password to confirm.',
+  'profile.deleteConfirm': 'Delete forever',
+  'profile.deleting': 'Deleting...',
+  'profile.incorrectPassword': 'Incorrect password.',
 
   // Settings
   'settings.back': '← Back to Studio',
@@ -292,6 +300,22 @@ const en = {
   'auth.accountError': 'Could not load your account.',
   'auth.passwordHint': 'At least 8 characters, with at least one letter and one number.',
   'auth.passwordRules': 'Your password must be at least 8 characters long and contain at least one letter and one number.',
+  'auth.forgotLink': 'Forgot your password?',
+  'auth.forgotTitle': 'Reset your password',
+  'auth.forgotText': "Enter your account's email and we'll send you a link to choose a new password.",
+  'auth.sendResetLink': 'Send reset link',
+  'auth.sending': 'Sending...',
+  'auth.resetSent': 'If an account exists for that email, a reset link is on its way. It is valid for 30 minutes.',
+  'auth.backToLogin': 'Back to log in',
+  'auth.resetTitle': 'Choose a new password',
+  'auth.newPassword': 'New password',
+  'auth.confirmPassword': 'Confirm new password',
+  'auth.passwordsDontMatch': "The passwords don't match.",
+  'auth.savePassword': 'Save new password',
+  'auth.saving': 'Saving...',
+  'auth.resetDone': 'Your password has been changed. You can now log in.',
+  'auth.resetInvalid': 'This reset link is invalid or has expired. Please request a new one.',
+  'auth.requestNewLink': 'Request a new link',
 };
 
 export default en;

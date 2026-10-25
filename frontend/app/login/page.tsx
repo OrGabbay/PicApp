@@ -92,6 +92,12 @@ export default function LoginPage() {
             {message && <p role="status">{message}</p>}
 
             <p className="text-sm">
+              <Link href="/forgot-password" className="underline">
+                {t("auth.forgotLink")}
+              </Link>
+            </p>
+
+            <p className="text-sm">
               {t("auth.noAccount")}{" "}
               <Link href="/register" className="underline">
                 {t("auth.register")}

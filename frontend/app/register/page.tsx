@@ -12,19 +12,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useI18n, translateServerMessage } from "@/src/i18n";
-
-// Same rules as the backend (backend/schemas.py: UserCreate)
-const PASSWORD_MIN_LENGTH = 8;
-const PASSWORD_MAX_LENGTH = 128;
-
-function passwordMeetsRules(password: string): boolean {
-  return (
-    password.length >= PASSWORD_MIN_LENGTH &&
-    password.length <= PASSWORD_MAX_LENGTH &&
-    /\p{L}/u.test(password) &&
-    /\p{N}/u.test(password)
-  );
-}
+import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, passwordMeetsRules } from "@/src/lib/password";
 
 export default function RegisterPage() {
   const [email, setEmail] = useState("");

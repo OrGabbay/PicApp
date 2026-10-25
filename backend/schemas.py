@@ -20,6 +20,11 @@ def _normalize_email(value: str) -> str:
     # Emails are case-insensitive in practice: store and look them up in lowercase
     return value.lower()
 
+def _check_password_strength(value: str) -> str:
+    if not any(c.isalpha() for c in value) or not any(c.isdigit() for c in value):
+        raise ValueError("Password must contain at least one letter and one number")
+    return value
+
 class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
@@ -27,9 +32,7 @@ class UserCreate(BaseModel):
     @field_validator("password")
     @classmethod
     def password_strength(cls, value: str) -> str:
-        if not any(c.isalpha() for c in value) or not any(c.isdigit() for c in value):
-            raise ValueError("Password must contain at least one letter and one number")
-        return value
+        return _check_password_strength(value)
 
     @field_validator("email")
     @classmethod
@@ -44,6 +47,26 @@ class UserLogin(BaseModel):
     @classmethod
     def normalize_email(cls, value: str) -> str:
         return _normalize_email(value)
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return _normalize_email(value)
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, value: str) -> str:
+        return _check_password_strength(value)
+
+class DeleteAccountIn(BaseModel):
+    password: str = Field(max_length=PASSWORD_MAX_LENGTH)
 
 class UserOut(BaseModel):
     id: int

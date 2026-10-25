@@ -85,6 +85,18 @@ export async function logout(): Promise<void> {
   await fetch("/api/auth/logout", { method: "POST" });
 }
 
+/** Permanently deletes the logged-in account; resolves to the backend's error message, or null on success. */
+export async function deleteAccount(password: string): Promise<string | null> {
+  const res = await fetch("/api/auth/delete-account", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  if (res.ok) return null;
+  const data = await res.json().catch(() => ({}));
+  return typeof data.detail === "string" ? data.detail : "Failed to delete account";
+}
+
 /**
  * Detect the AI company/provider from a key string.
  */

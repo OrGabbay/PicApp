@@ -53,6 +53,8 @@ const SERVER_MESSAGES: Record<string, MessageKey> = {
   'Cannot connect to the backend. Check that it is running.': 'common.backendOffline',
   'Login failed. Check that the backend is running.': 'common.backendOffline',
   'Too many requests. Please wait and try again.': 'common.tooManyRequests',
+  'Invalid or expired reset link': 'auth.resetInvalid',
+  'Incorrect password': 'profile.incorrectPassword',
 };
 
 export function translateServerMessage(language: Language, message: string): string {

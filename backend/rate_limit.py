@@ -74,6 +74,8 @@ login_ip_limiter = RateLimiter(limit=20, window=5 * 60)          # all login att
 login_failure_limiter = RateLimiter(limit=5, window=15 * 60)     # wrong passwords per account + IP
 login_account_limiter = RateLimiter(limit=50, window=60 * 60)    # wrong passwords per account, any IP
 register_limiter = RateLimiter(limit=5, window=60 * 60)          # new accounts per IP
+reset_ip_limiter = RateLimiter(limit=10, window=15 * 60)         # reset requests + confirmations per IP
+reset_email_limiter = RateLimiter(limit=3, window=60 * 60)       # reset emails per account
 guest_generation_limiter = RateLimiter(limit=5, window=60)       # guest images per IP
 user_generation_limiter = RateLimiter(limit=15, window=60)       # images per logged-in user
 enhance_limiter = RateLimiter(limit=20, window=60)               # prompt enhancements per IP
