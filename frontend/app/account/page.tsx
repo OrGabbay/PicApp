@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { AccountCard, AccountMessage } from "./AccountView";
+import { BACKEND_URL } from "@/src/lib/backend";
 
 // With Cache Components, reading cookies() must happen behind a Suspense boundary
 export default function AccountPage() {
@@ -20,7 +21,7 @@ async function AccountDetails() {
     redirect("/login");
   }
 
-  const response = await fetch("http://127.0.0.1:8000/auth/me", {
+  const response = await fetch(`${BACKEND_URL}/auth/me`, {
     headers: {
       Authorization: `Bearer ${token}`,
     },

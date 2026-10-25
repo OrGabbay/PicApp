@@ -89,17 +89,33 @@ npm run dev
 
 ## API Keys
 
-API keys are available to **logged-in accounts** (Settings → paste your key). Guests always use the free engine — the backend ignores keys sent without a login. The provider is detected from the key's prefix:
+Pick the image engine from the **Image Engine** dropdown in the Studio. Paid engines run on the user's own account with that company: connect its API key under **Settings → AI Provider Keys** (one card per provider). Keys are a **logged-in feature** — guests always use the free engine, and the backend ignores keys sent without a login. Choosing a locked engine opens a popup that asks guests to log in, or links logged-in users straight to that provider's card.
 
-| Key | Prompt enhancement | Image generation |
-|-----|-------------------|------------------|
-| Anthropic `sk-ant-…` | Claude Opus 5.5 | Free FLUX engine (Anthropic has no image API) |
-| OpenAI `sk-proj-…` | GPT-4o mini | DALL-E 3 |
-| Google AI Studio `AIza…` | Gemini | Imagen 3 |
-| Groq `gsk_…` | Llama 3.3 70B | Free FLUX engine |
-| *No key* | Built-in style presets | Free FLUX engine |
+| Engine | Model (override in `backend/.env`) | Needs | ≈ cost / image |
+|--------|-----------------------------------|-------|----------------|
+| **Free** | | | |
+| Pollinations Classic | Pollinations' anonymous API | nothing | free (basic quality, ~1 image / 45 s per server) |
+| FLUX.2 klein · Z-Image Turbo · FLUX.1 schnell · GPT Image 1 mini | via Pollinations' keyed API | free Pollinations account (key `sk_…`) | free quest pollen — e.g. ~500 FLUX.1 schnell images per pollen |
+| FLUX.1 schnell (Cloudflare) | `@cf/black-forest-labs/flux-1-schnell` (`CLOUDFLARE_IMAGE_MODEL`) | free Cloudflare account (account ID + Workers AI token) | free daily allowance (~100 images/day, square only) |
+| **Paid** | | | |
+| OpenAI GPT Image 2 | `gpt-image-2` (`OPENAI_IMAGE_MODEL`) | OpenAI key | $0.05 |
+| Google Nano Banana 2 | `gemini-3.1-flash-image` (`GEMINI_IMAGE_MODEL`) | Google AI Studio key | $0.07 |
+| Google Nano Banana Pro | `gemini-3-pro-image` (`GEMINI_PRO_IMAGE_MODEL`) | Google AI Studio key | $0.13 |
+| FLUX.2 Pro | `flux-2-pro-preview` (`FLUX_MODEL`) | Black Forest Labs key | $0.03 |
+
+**Prompt enhancement** (the *Enhance Prompt* button, and generations with the free engine) uses one connected key — Anthropic, OpenAI, Google or Groq — chosen under *Settings → Prompt enhancement* (default: automatic). Paid image engines get the prompt as written, since they understand prompts well.
 
 If a key can't be used (invalid, expired, out of credits, rate-limited…), the Studio shows a popup with the reason and the image is generated with the free engine instead.
+
+### The free engines
+
+The **Free** group in the dropdown costs nothing. Pollinations Classic needs no account; the others need a free account with Pollinations or Cloudflare, connected under *Settings → AI Provider Keys* (marked **Free**). If a chosen engine's key fails and the Classic fallback is busy too, the Studio shows both the key problem and the countdown.
+
+**Pollinations Classic:**
+
+- The backend downloads each free image when it is generated and stores it in `backend/static/generations/`, so the gallery never depends on Pollinations afterwards. Guest images (not in any gallery) are deleted after 24 hours.
+- Pollinations' free tier allows **about one image every 45 seconds for the whole server**. When it's busy, the Studio shows a countdown and re-enables **Generate** when the engine is ready — nothing broken is ever saved.
+- Set `POLLINATIONS_TOKEN` in `backend/.env` (a key from [enter.pollinations.ai](https://enter.pollinations.ai)) to switch Classic to Pollinations' keyed API and a much better model (`POLLINATIONS_DEFAULT_MODEL`, default FLUX.2 klein) for everyone.
 Calls made with your key accrue that provider's standard API charges.
 
 ---
@@ -205,12 +221,25 @@ PicApp/
 
 ## Security Notes
 
-This project is set up for **local development**:
+**Built in:**
+
+- **Passwords**: hashed with argon2; must be 8–128 characters with at least one letter and one number.
+- **Sessions**: JWT in an httpOnly cookie (30 min), revoked on the server at logout. The browser never handles the token — `frontend/app/api/backend/[...path]` attaches it.
+- **Rate limits** (`backend/rate_limit.py`, in memory): 5 wrong passwords per account per 15 min, 20 login attempts per IP per 5 min, 5 sign-ups per IP per hour, 5 images/min for guests and 15/min per user.
+- **Access control**: users can only see, favorite and delete their own images; API keys are ignored for guests.
+- **CSRF**: state-changing requests through Next.js must come from the app's own origin.
+- **Headers**: Content-Security-Policy, X-Frame-Options, nosniff, Referrer-Policy and Permissions-Policy on the frontend (`next.config.ts`); HSTS in production builds.
+
+**Before deploying anywhere other than your own machine:**
 
 - Never commit `backend/.env` or `frontend/.env.local` — they are git-ignored; only the `.example` templates are tracked.
-- The database password in `docker-compose.yml` is a local default. Change it (and `DATABASE_URL` in `backend/.env`) before running anywhere other than your own machine.
-- A key saved in **Settings** is stored in the browser's `localStorage` and sent to your local backend on each request.
-- Images saved by the backend go to `backend/static/` (git-ignored).
+- Change the database password: set `POSTGRES_PASSWORD` in a `.env` file next to `docker-compose.yml` and update `DATABASE_URL` in `backend/.env`.
+- Serve everything over HTTPS (secure cookies and HSTS turn on automatically in production builds).
+- Set `PUBLIC_BACKEND_URL` and `CORS_ORIGINS` (backend) and `BACKEND_URL` / `PUBLIC_BACKEND_URL` (frontend) to your real addresses.
+- Per-IP rate limits need the visitor's real IP: put Next.js behind a reverse proxy that overwrites `X-Forwarded-For` and set `TRUST_PROXY_HEADERS=true`. Without it, per-IP limits count all traffic together (the per-account login limit works either way).
+- Rate limits and revoked tokens live in memory, so they reset on restart and assume a single backend process.
+
+**Good to know:** a key saved in **Settings** is stored in the browser's `localStorage` (protected by the CSP, removed on logout). Images saved by the backend go to `backend/static/` (git-ignored) and are public to anyone who has their unguessable URL.
 
 ---
 

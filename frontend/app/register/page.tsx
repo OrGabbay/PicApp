@@ -13,6 +13,19 @@ import {
 } from "@/components/ui/card";
 import { useI18n, translateServerMessage } from "@/src/i18n";
 
+// Same rules as the backend (backend/schemas.py: UserCreate)
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_MAX_LENGTH = 128;
+
+function passwordMeetsRules(password: string): boolean {
+  return (
+    password.length >= PASSWORD_MIN_LENGTH &&
+    password.length <= PASSWORD_MAX_LENGTH &&
+    /\p{L}/u.test(password) &&
+    /\p{N}/u.test(password)
+  );
+}
+
 export default function RegisterPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -23,6 +36,10 @@ export default function RegisterPage() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setMessage("");
+    if (!passwordMeetsRules(password)) {
+      setMessage(t("auth.passwordRules"));
+      return;
+    }
     setLoading(true);
 
     try {
@@ -38,7 +55,9 @@ export default function RegisterPage() {
         setMessage(
           typeof data.detail === "string"
             ? translateServerMessage(language, data.detail)
-            : t("auth.checkCredentials")
+            : response.status === 422
+              ? t("auth.passwordRules")
+              : t("auth.checkCredentials")
         );
         return;
       }
@@ -94,8 +113,14 @@ export default function RegisterPage() {
                 autoComplete="new-password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
+                minLength={PASSWORD_MIN_LENGTH}
+                maxLength={PASSWORD_MAX_LENGTH}
+                aria-describedby="password-hint"
                 required
               />
+              <p id="password-hint" className="text-xs text-muted-foreground">
+                {t("auth.passwordHint")}
+              </p>
             </div>
 
             <Button

@@ -10,6 +10,8 @@ import type {
   DetectProviderResponse,
   CurrentUser,
 } from "@/src/types/api";
+import { clearAllKeys, getStoredKeys, resolveEnhancer, type KeyProvider } from "@/src/lib/keys";
+import { getEngine } from "@/src/lib/engines";
 
 /** All backend calls go through the Next.js proxy, which attaches the login cookie's token. */
 const API_BASE = "/api/backend";
@@ -22,28 +24,52 @@ export class AuthRequiredError extends Error {
   }
 }
 
-/** Read the user's stored AI key from localStorage (supporting universal key & legacy key). */
-export function getUserApiKey(): string {
-  if (typeof window === "undefined") return "";
-  return (
-    localStorage.getItem("ai_user_key")?.trim() ||
-    localStorage.getItem("anthropic_user_key")?.trim() ||
-    ""
-  );
+/** Why the chosen engine's key failed, when the free engine was only a fallback. */
+export interface KeyIssueInfo {
+  code?: string | null;
+  provider?: string | null;
+  message?: string | null;
 }
 
-/** Remove the stored AI key and provider (called on logout so the key doesn't outlive the session). */
+/** The free image engine is rate limited; it accepts a new image after `retryAfter` seconds. */
+export class EngineBusyError extends Error {
+  constructor(public retryAfter: number, public keyIssue: KeyIssueInfo | null = null) {
+    super("The free image engine is busy.");
+    this.name = "EngineBusyError";
+  }
+}
+
+/** The free image engine failed (network error, outage). */
+export class EngineUnavailableError extends Error {
+  constructor(public keyIssue: KeyIssueInfo | null = null) {
+    super("The free image engine is unavailable right now.");
+    this.name = "EngineUnavailableError";
+  }
+}
+
+/** Remove every stored AI key (called on logout so keys don't outlive the session). */
 export function clearStoredApiKey(): void {
-  if (typeof window === "undefined") return;
-  localStorage.removeItem("ai_user_key");
-  localStorage.removeItem("anthropic_user_key");
-  localStorage.removeItem("ai_user_provider");
+  clearAllKeys();
 }
 
-/** Read the user's selected provider or auto-detect preference. */
-export function getUserProvider(): string {
-  if (typeof window === "undefined") return "";
-  return localStorage.getItem("ai_user_provider")?.trim() || "";
+// The backend calls Google "gemini"
+const BACKEND_PROVIDER_NAMES: Record<KeyProvider, string> = {
+  openai: "openai",
+  google: "gemini",
+  anthropic: "anthropic",
+  groq: "groq",
+  bfl: "bfl",
+  pollinations: "pollinations",
+  cloudflare: "cloudflare",
+};
+
+/** Headers carrying the key that enhances prompts (or nothing if none is connected). */
+function enhancerHeaders(provider?: KeyProvider): Record<string, string> {
+  const stored = getStoredKeys();
+  const enhancer = provider
+    ? stored.keys[provider] ? { provider, key: stored.keys[provider]! } : null
+    : resolveEnhancer(stored);
+  return enhancer ? { "x-api-key": enhancer.key, "x-provider": BACKEND_PROVIDER_NAMES[enhancer.provider] } : {};
 }
 
 /** Returns the logged-in user, or null for guests. */
@@ -79,22 +105,14 @@ export async function detectProvider(key: string): Promise<DetectProviderRespons
  * or fallback preset when no key is supplied.
  */
 export async function enhancePrompt(
-  payload: EnhancePromptRequest
+  payload: EnhancePromptRequest,
+  /** Test a specific provider's key instead of the configured enhancer */
+  useProvider?: KeyProvider
 ): Promise<EnhancePromptResponse> {
-  const apiKey = getUserApiKey();
-  const provider = payload.provider || getUserProvider();
-
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...enhancerHeaders(useProvider),
   };
-
-  if (apiKey) {
-    headers["x-api-key"] = apiKey;
-    headers["x-anthropic-key"] = apiKey;
-  }
-  if (provider) {
-    headers["x-provider"] = provider;
-  }
 
   const res = await fetch(`${API_BASE}/api/v1/prompts/enhance`, {
     method: "POST",
@@ -117,20 +135,15 @@ export async function enhancePrompt(
 export async function createGeneration(
   payload: CreateGenerationRequest
 ): Promise<GenerationItem> {
-  const apiKey = getUserApiKey();
-  const provider = payload.provider || getUserProvider();
+  const engine = getEngine(payload.engine ?? "free");
+  const imageKey = engine.provider ? getStoredKeys().keys[engine.provider] : undefined;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    // The enhancer key only matters for the free engine (it rewrites the prompt first)
+    ...(engine.provider ? {} : enhancerHeaders()),
+    ...(imageKey ? { "x-image-key": imageKey } : {}),
   };
-
-  if (apiKey) {
-    headers["x-api-key"] = apiKey;
-    headers["x-anthropic-key"] = apiKey;
-  }
-  if (provider) {
-    headers["x-provider"] = provider;
-  }
 
   const res = await fetch(`${API_BASE}/api/v1/generations/create`, {
     method: "POST",
@@ -140,8 +153,29 @@ export async function createGeneration(
 
   if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { detail?: string }).detail ?? "Failed to generate image");
+    const err = (await res.json().catch(() => ({}))) as {
+      detail?:
+        | string
+        | {
+            code?: string;
+            retry_after?: number;
+            key_warning?: string;
+            key_warning_code?: string;
+            key_warning_provider?: string;
+          };
+    };
+    const detail = err.detail;
+    const keyIssue =
+      typeof detail === "object" && detail?.key_warning_code
+        ? { code: detail.key_warning_code, provider: detail.key_warning_provider, message: detail.key_warning }
+        : null;
+    if (typeof detail === "object" && detail?.code === "engine_busy") {
+      throw new EngineBusyError(detail.retry_after ?? 45, keyIssue);
+    }
+    if (typeof detail === "object" && detail?.code === "engine_unavailable") {
+      throw new EngineUnavailableError(keyIssue);
+    }
+    throw new Error(typeof detail === "string" ? detail : "Failed to generate image");
   }
   return res.json();
 }

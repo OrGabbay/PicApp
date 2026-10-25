@@ -1,16 +1,28 @@
 # backend/schemas.py
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional, List
 from datetime import datetime
+
+# Password rules, shared with the register form (frontend/app/register/page.tsx).
+# The upper bound keeps a huge password from tying up the (deliberately slow) argon2 hasher.
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 128
 
 # --- Auth Schemas ---
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, value: str) -> str:
+        if not any(c.isalpha() for c in value) or not any(c.isdigit() for c in value):
+            raise ValueError("Password must contain at least one letter and one number")
+        return value
 
 class UserLogin(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(max_length=PASSWORD_MAX_LENGTH)
 
 class UserOut(BaseModel):
     id: int
@@ -54,6 +66,11 @@ class GenerateImageRequest(BaseModel):
     aspect_ratio: Optional[str] = "1:1"
     style: Optional[str] = None
     provider: Optional[str] = None
+    # Image engine chosen in the Studio (see providers.IMAGE_ENGINES)
+    engine: str = Field(
+        default="free",
+        pattern="^(free|openai|gemini|gemini-pro|flux|pollinations-(klein|zimage|schnell|gptmini)|cloudflare-schnell)$",
+    )
 
 class GenerationOut(BaseModel):
     # id / prompt_id are None for guest generations, which are not saved

@@ -1,7 +1,16 @@
 'use client';
-import { useState, useEffect, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import Link from 'next/link';
-import { enhancePrompt, detectProvider, clearStoredApiKey } from '@/src/lib/api';
+import { enhancePrompt } from '@/src/lib/api';
+import {
+  ENHANCER_PROVIDERS,
+  guessProvider,
+  setEnhancer,
+  setProviderKey,
+  useStoredKeys,
+  type KeyProvider,
+} from '@/src/lib/keys';
+import { FREE_PROVIDERS, PROVIDER_KEY_URLS, PROVIDER_NAMES } from '@/src/lib/engines';
 import { useCurrentUser } from '@/src/lib/useCurrentUser';
 import {
   updatePreferences,
@@ -13,16 +22,6 @@ import {
   type ThemePreference,
 } from '@/src/lib/preferences';
 import { useI18n, LANGUAGE_NAMES, type MessageKey } from '@/src/i18n';
-
-// Provider names are brand names, so only the "auto" option is translated
-const PROVIDER_OPTIONS = [
-  { id: '', label: null },
-  { id: 'openai', label: '🟢 OpenAI (GPT-4o / ChatGPT)' },
-  { id: 'anthropic', label: '🟣 Anthropic (Claude Opus 5.5)' },
-  { id: 'gemini', label: '🔵 Google (Gemini 1.5 Flash)' },
-  { id: 'groq', label: '🟠 Groq (Llama 3.3 70B)' },
-  { id: 'openrouter', label: '🌐 OpenRouter (Multi-Model)' },
-];
 
 const THEME_OPTIONS: { value: ThemePreference; label: MessageKey; icon: string }[] = [
   { value: 'dark', label: 'settings.themeDark', icon: '🌙' },
@@ -43,16 +42,6 @@ const LAYOUT_OPTIONS: { value: GalleryLayout; label: MessageKey; hint: MessageKe
   { value: 'grid', label: 'settings.layoutGrid', hint: 'settings.layoutGridHint', icon: '▦' },
   { value: 'masonry', label: 'settings.layoutMasonry', hint: 'settings.layoutMasonryHint', icon: '▥' },
 ];
-
-function readStoredKey(): string {
-  if (typeof window === 'undefined') return '';
-  return localStorage.getItem('ai_user_key') || localStorage.getItem('anthropic_user_key') || '';
-}
-
-function readStoredProvider(): string {
-  if (typeof window === 'undefined') return '';
-  return localStorage.getItem('ai_user_provider') || '';
-}
 
 /** Card wrapper for one settings section. */
 function Section({ icon, title, children }: { icon: string; title: string; children: ReactNode }) {
@@ -108,99 +97,77 @@ function OptionGroup<T extends string>({
   );
 }
 
-export default function SettingsPage() {
-  // Reading storage in the initializer is safe: the key form only renders after the
-  // login check finishes in the browser, so the server never renders these values
-  const [userKey, setUserKey]           = useState(readStoredKey);
-  const [selectedProvider, setSelectedProvider] = useState(readStoredProvider);
-  const [detectedName, setDetectedName] = useState<string | null>(null);
-  const [showKey, setShowKey]           = useState(false);
-  const [saved, setSaved]               = useState(false);
-  const [testing, setTesting]           = useState(false);
-  const [testResult, setTestResult]     = useState<{ ok: boolean; msg: string } | null>(null);
-  const user = useCurrentUser();
-  const prefs = usePreferences();
+// Provider cards: free accounts first, then paid image engines, then prompt-only providers.
+// `images` / `prompts` say what each key is used for.
+const KEY_PROVIDERS: { provider: KeyProvider; images: boolean; prompts: boolean }[] = [
+  { provider: 'pollinations', images: true, prompts: false },
+  { provider: 'cloudflare', images: true, prompts: false },
+  { provider: 'openai', images: true, prompts: true },
+  { provider: 'google', images: true, prompts: true },
+  { provider: 'bfl', images: true, prompts: false },
+  { provider: 'anthropic', images: false, prompts: true },
+  { provider: 'groq', images: false, prompts: true },
+];
+
+/** One provider's key: connect, update, test (text providers) and disconnect. */
+function ProviderKeyCard({
+  provider,
+  images,
+  prompts,
+  savedKey,
+}: {
+  provider: KeyProvider;
+  images: boolean;
+  prompts: boolean;
+  savedKey?: string;
+}) {
   const { t } = useI18n();
+  const [draft, setDraft] = useState('');
+  // Cloudflare keys are two values; they're stored together as "ACCOUNT_ID:API_TOKEN"
+  const [accountId, setAccountId] = useState('');
+  const twoPart = provider === 'cloudflare';
+  const free = FREE_PROVIDERS.includes(provider);
+  const [show, setShow] = useState(false);
+  const [justSaved, setJustSaved] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const name = PROVIDER_NAMES[provider];
+  const guessed = draft.trim() ? guessProvider(draft) : null;
+  // BFL and Cloudflare keys have no prefix, so any recognizable prefix means it's another company's key
+  const looksWrong =
+    draft.trim() !== '' && (provider === 'bfl' || twoPart ? guessed !== null : guessed !== provider);
+  const uses = [images && t(free ? 'settings.useFreeImages' : 'settings.useImages'), prompts && t('settings.usePrompts')]
+    .filter(Boolean)
+    .join(' · ');
+  const canSave = draft.trim() !== '' && (!twoPart || accountId.trim() !== '');
 
-  const detectCompany = async (key: string) => {
-    if (!key.trim()) {
-      setDetectedName(null);
-      return;
-    }
-    const res = await detectProvider(key);
-    setDetectedName(res.provider !== 'unknown' ? res.name : null);
-  };
-
-  // Show which company the saved key belongs to
-  useEffect(() => {
-    const key = readStoredKey().trim();
-    if (key) {
-      detectProvider(key).then((res) => setDetectedName(res.provider !== 'unknown' ? res.name : null));
-    }
-  }, []);
-
-  const handleKeyChange = (val: string) => {
-    setUserKey(val);
-    setSaved(false);
+  const save = () => {
+    setProviderKey(provider, twoPart ? `${accountId.trim()}:${draft.trim()}` : draft);
+    setDraft('');
+    setAccountId('');
     setTestResult(null);
-    detectCompany(val);
+    setJustSaved(true);
+    setTimeout(() => setJustSaved(false), 2000);
   };
 
-  const handleSave = () => {
-    const trimmed = userKey.trim();
-    if (trimmed) {
-      localStorage.setItem('ai_user_key', trimmed);
-      localStorage.setItem('anthropic_user_key', trimmed); // backward compat
-      if (selectedProvider) {
-        localStorage.setItem('ai_user_provider', selectedProvider);
-      } else {
-        localStorage.removeItem('ai_user_provider');
-      }
-    } else {
-      clearStoredApiKey();
-    }
-    setSaved(true);
-    setTestResult(null);
-    setTimeout(() => setSaved(false), 2500);
-  };
-
-  const handleClear = () => {
-    clearStoredApiKey();
-    setUserKey('');
-    setSelectedProvider('');
-    setDetectedName(null);
-    setSaved(false);
+  const disconnect = () => {
+    setProviderKey(provider, '');
     setTestResult(null);
   };
 
-  const handleTestKey = async () => {
-    const trimmed = userKey.trim();
-    if (!trimmed) {
-      setTestResult({ ok: false, msg: t('settings.testNoKey') });
-      return;
-    }
-
+  // Tests the saved key with a tiny prompt-enhancement request (cheap; image models would cost more)
+  const test = async () => {
     setTesting(true);
     setTestResult(null);
-
     try {
-      localStorage.setItem('ai_user_key', trimmed);
-      if (selectedProvider) {
-        localStorage.setItem('ai_user_provider', selectedProvider);
-      }
-      const res = await enhancePrompt({
-        prompt: 'A futuristic city in the clouds',
-        provider: selectedProvider || undefined,
-      });
-
+      const res = await enhancePrompt({ prompt: 'A futuristic city in the clouds' }, provider);
       if (res.engine && res.engine !== 'Preset') {
         setTestResult({ ok: true, msg: t('settings.testSuccess', { engine: res.engine }) });
       } else {
-        const reasonKey = `keyIssue.${res.error_code}` as MessageKey;
         setTestResult({
           ok: false,
           msg: res.error_code
-            ? t(reasonKey, { provider: res.error_provider || 'AI' })
+            ? t(`keyIssue.${res.error_code}` as MessageKey, { provider: res.error_provider || name })
             : res.error || t('settings.testFailed'),
         });
       }
@@ -211,7 +178,128 @@ export default function SettingsPage() {
     }
   };
 
-  const hasKey = userKey.trim().length > 0;
+  return (
+    <div
+      id={`key-${provider}`}
+      className="scroll-mt-24 rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4 transition-shadow data-[highlight=true]:border-blue-500 data-[highlight=true]:ring-2 data-[highlight=true]:ring-blue-500/40"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+        <h3 className="text-white font-semibold text-sm flex items-center gap-2">
+          {t('settings.keyFor', { provider: name })}
+          <span
+            className={`px-1.5 py-0.5 rounded-md border text-[10px] font-bold uppercase tracking-wide ${
+              free
+                ? 'bg-emerald-600/20 border-emerald-500/40 text-emerald-300'
+                : 'bg-amber-600/20 border-amber-500/40 text-amber-300'
+            }`}
+          >
+            {free ? t('settings.freeBadge') : t('settings.paidBadge')}
+          </span>
+        </h3>
+        <span className={`text-[11px] font-semibold ${savedKey ? 'text-emerald-400' : 'text-zinc-500'}`}>
+          {savedKey ? `${t('settings.connected')} · …${savedKey.slice(-4)}` : t('settings.notConnected')}
+        </span>
+      </div>
+      <p className="text-[11px] text-zinc-500 mb-3">
+        {t('settings.usedFor', { uses })} ·{' '}
+        <a href={PROVIDER_KEY_URLS[provider]} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
+          {t('settings.getKey')}
+        </a>
+      </p>
+
+      {twoPart && (
+        <input
+          type="text"
+          dir="ltr"
+          autoComplete="off"
+          spellCheck={false}
+          value={accountId}
+          onChange={(e) => setAccountId(e.target.value)}
+          aria-label={t('settings.cfAccountId')}
+          placeholder={t('settings.cfAccountId')}
+          className="w-full mb-2 bg-zinc-950 text-white text-xs px-3.5 py-2.5 rounded-xl border border-zinc-700/80 focus:outline-none focus:border-blue-500 font-mono"
+        />
+      )}
+      <div className="flex gap-2">
+        <input
+          type={show ? 'text' : 'password'}
+          dir="ltr"
+          autoComplete="off"
+          spellCheck={false}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          aria-label={twoPart ? t('settings.cfToken') : t('settings.keyFor', { provider: name })}
+          placeholder={savedKey ? '••••••••' + savedKey.slice(-4) : twoPart ? t('settings.cfToken') : ''}
+          className="flex-1 min-w-0 bg-zinc-950 text-white text-xs px-3.5 py-2.5 rounded-xl border border-zinc-700/80 focus:outline-none focus:border-blue-500 font-mono"
+        />
+        <button
+          type="button"
+          onClick={() => setShow(!show)}
+          className="px-2.5 text-[11px] text-zinc-500 hover:text-zinc-300"
+        >
+          {show ? t('settings.hideKey') : t('settings.showKey')}
+        </button>
+        <button
+          type="button"
+          onClick={save}
+          disabled={!canSave}
+          className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-colors disabled:opacity-40 ${
+            justSaved ? 'bg-emerald-600 text-white' : 'bg-blue-600 hover:bg-blue-500 text-white'
+          }`}
+        >
+          {justSaved ? t('settings.savedKey') : savedKey ? t('settings.update') : t('settings.connect')}
+        </button>
+      </div>
+      {looksWrong && <p className="text-[11px] text-amber-400 mt-2">⚠️ {t('settings.wrongProvider', { provider: name })}</p>}
+
+      {savedKey && (
+        <div className="flex flex-wrap gap-2 mt-3">
+          {prompts && (
+            <button
+              type="button"
+              onClick={test}
+              disabled={testing}
+              className="px-3 py-1.5 rounded-xl text-[11px] font-semibold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 disabled:opacity-40 flex items-center gap-1.5"
+            >
+              {testing && <span className="w-3 h-3 border-2 border-zinc-400 border-t-white rounded-full animate-spin" />}
+              {testing ? t('settings.testing') : t('settings.test')}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={disconnect}
+            className="px-3 py-1.5 rounded-xl text-[11px] font-medium bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-rose-400 border border-zinc-800"
+          >
+            {t('settings.disconnect')}
+          </button>
+        </div>
+      )}
+
+      {testResult && (
+        <p role="status" className={`text-[11px] mt-2 ${testResult.ok ? 'text-emerald-400' : 'text-rose-400'}`}>
+          {testResult.ok ? '✓' : '⚠️'} {testResult.msg}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export default function SettingsPage() {
+  const user = useCurrentUser();
+  const prefs = usePreferences();
+  const storedKeys = useStoredKeys();
+  const { t } = useI18n();
+  const connectedEnhancers = ENHANCER_PROVIDERS.filter((p) => storedKeys.keys[p]);
+
+  // Links like /settings#key-google (from the Studio's engine popup) point at a card that only
+  // renders after the login check, so scroll to and highlight it once it exists
+  useEffect(() => {
+    if (!user || !window.location.hash.startsWith('#key-')) return;
+    const card = document.getElementById(window.location.hash.slice(1));
+    card?.scrollIntoView({ block: 'center' });
+    card?.setAttribute('data-highlight', 'true');
+    card?.querySelector('input')?.focus({ preventScroll: true });
+  }, [user]);
 
   return (
     <div className="max-w-2xl mx-auto w-full px-6 py-10">
@@ -271,8 +359,8 @@ export default function SettingsPage() {
         />
       </Section>
 
-      {/* AI provider key: a logged-in feature (the backend ignores keys sent by guests) */}
-      <Section icon="🤖" title={t('settings.apiKeySection')}>
+      {/* AI provider keys: a logged-in feature (the backend ignores keys sent by guests) */}
+      <Section icon="🔑" title={t('settings.apiKeySection')}>
         {user === null ? (
           <div className="flex flex-col items-center text-center py-6">
             <div className="text-4xl mb-3">🔑</div>
@@ -295,144 +383,27 @@ export default function SettingsPage() {
           </div>
         ) : user ? (
           <>
-            <div className="mb-6">
-              <h3 className="text-white font-semibold text-sm">{t('settings.byokTitle')}</h3>
-              <p className="text-zinc-400 text-xs mt-1 leading-relaxed">{t('settings.byokText')}</p>
+            <p className="text-zinc-400 text-xs leading-relaxed mb-5">{t('settings.keysIntro')}</p>
+            <div className="flex flex-col gap-3 mb-6">
+              {KEY_PROVIDERS.map((p) => (
+                <ProviderKeyCard key={p.provider} {...p} savedKey={storedKeys.keys[p.provider]} />
+              ))}
             </div>
 
-            {/* API Key Input */}
-            <div className="flex flex-col gap-2 mb-4">
-              <div className="flex items-center justify-between">
-                <label htmlFor="api-key" className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
-                  {t('settings.apiKey')}
-                </label>
-                <button
-                  type="button"
-                  onClick={() => setShowKey(!showKey)}
-                  className="text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors"
-                >
-                  {showKey ? t('settings.hideKey') : t('settings.showKey')}
-                </button>
-              </div>
+            <OptionGroup
+              label={t('settings.enhancerTitle')}
+              hint={t('settings.enhancerHint')}
+              value={storedKeys.enhancer}
+              options={[
+                { value: 'auto' as const, label: t('settings.enhancerAuto') },
+                ...connectedEnhancers.map((p) => ({ value: p, label: PROVIDER_NAMES[p] })),
+              ]}
+              onChange={(enhancer) => setEnhancer(enhancer)}
+            />
 
-              <input
-                id="api-key"
-                type={showKey ? 'text' : 'password'}
-                dir="ltr"
-                placeholder={t('settings.keyPlaceholder')}
-                value={userKey}
-                onChange={(e) => handleKeyChange(e.target.value)}
-                className="bg-zinc-950 text-white text-xs px-4 py-3 rounded-2xl border border-zinc-700/80 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 w-full font-mono transition-all"
-              />
-
-              {/* Automatic Company Detection Badge */}
-              {detectedName && (
-                <div className="flex items-center gap-2 mt-1.5 px-3 py-1.5 rounded-xl bg-blue-950/40 border border-blue-800/40 text-blue-300 text-xs font-medium">
-                  <span>🏢</span>
-                  <span>{t('settings.detected')}</span>
-                  <strong className="text-white">{detectedName}</strong>
-                </div>
-              )}
-            </div>
-
-            {/* Provider Override Dropdown */}
-            <div className="flex flex-col gap-2 mb-6">
-              <label htmlFor="provider-select" className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
-                {t('settings.providerSelection')}
-              </label>
-              <select
-                id="provider-select"
-                value={selectedProvider}
-                onChange={(e) => {
-                  setSelectedProvider(e.target.value);
-                  setSaved(false);
-                  setTestResult(null);
-                }}
-                className="bg-zinc-950 text-zinc-200 text-xs px-3.5 py-2.5 rounded-2xl border border-zinc-700/80 focus:outline-none focus:border-blue-500 transition-colors"
-              >
-                {PROVIDER_OPTIONS.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label ?? t('settings.providerAuto')}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Test Result Message */}
-            {testResult && (
-              <div
-                role="status"
-                className={`p-3.5 rounded-2xl text-xs mb-5 flex items-start gap-2.5 ${
-                  testResult.ok
-                    ? 'bg-emerald-950/40 border border-emerald-800/60 text-emerald-300'
-                    : 'bg-rose-950/40 border border-rose-800/60 text-rose-300'
-                }`}
-              >
-                <span className="text-base">{testResult.ok ? '✓' : '⚠️'}</span>
-                <p className="leading-relaxed">{testResult.msg}</p>
-              </div>
-            )}
-
-            {/* Action Buttons */}
-            <div className="flex flex-wrap gap-2.5 pt-2">
-              <button
-                type="button"
-                onClick={handleSave}
-                className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-bold transition-all duration-200 ${
-                  saved
-                    ? 'bg-emerald-600 text-white'
-                    : 'bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-900/30 active:scale-[0.98]'
-                }`}
-              >
-                {saved ? t('settings.saved') : t('settings.save')}
-              </button>
-
-              <button
-                type="button"
-                onClick={handleTestKey}
-                disabled={testing || !hasKey}
-                className="py-2.5 px-4 rounded-xl text-xs font-semibold bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-              >
-                {testing && (
-                  <span className="w-3 h-3 border-2 border-zinc-400 border-t-white rounded-full animate-spin inline-block" />
-                )}
-                {testing ? t('settings.testing') : t('settings.test')}
-              </button>
-
-              {hasKey && (
-                <button
-                  type="button"
-                  onClick={handleClear}
-                  className="py-2.5 px-4 rounded-xl text-xs font-medium bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-rose-400 border border-zinc-800 transition-colors"
-                >
-                  {t('settings.clear')}
-                </button>
-              )}
-            </div>
-
-            {/* Supported Providers Reference */}
-            <div className="mt-6 pt-5 border-t border-zinc-800/80 text-xs text-zinc-400 space-y-4">
-              <h3 className="text-white font-bold text-sm flex items-center gap-2">
-                <span>⚡</span> {t('settings.supported')}
-              </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                {[
-                  { name: '🟢 OpenAI (ChatGPT)', prefix: t('settings.prefixOpenAI') },
-                  { name: '🟣 Anthropic (Claude)', prefix: t('settings.prefixAnthropic') },
-                  { name: '🔵 Google (Gemini)', prefix: t('settings.prefixGoogle') },
-                  { name: '🟠 Groq (Llama 3.3)', prefix: t('settings.prefixGroq') },
-                ].map((p) => (
-                  <div key={p.name} className="bg-zinc-950/40 p-3 rounded-2xl border border-zinc-800/80">
-                    <strong className="text-white block mb-0.5">{p.name}</strong>
-                    <span className="text-[11px] text-zinc-500 font-mono">{p.prefix}</span>
-                  </div>
-                ))}
-              </div>
-
-              <p className="text-[11px] text-zinc-500 pt-1 border-t border-zinc-800/60 leading-relaxed">
-                {t('settings.storageNote')}
-              </p>
-            </div>
+            <p className="text-[11px] text-zinc-500 pt-4 mt-4 border-t border-zinc-800/60 leading-relaxed">
+              {t('settings.storageNote')}
+            </p>
           </>
         ) : null}
       </Section>

@@ -32,7 +32,6 @@ const MASONRY_COLUMNS: Record<GallerySize, string> = {
 
 export default function GalleryPage() {
   const [images, setImages]           = useState<GenerationItem[]>([]);
-  const [loading, setLoading]         = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [page, setPage]               = useState(1);
   const [hasMore, setHasMore]         = useState(false);
@@ -69,11 +68,37 @@ export default function GalleryPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- t only changes with the language
   }, [gallerySort]);
 
+  // The gallery is loading until the current tab/order has finished loading
+  const queryKey = `${user?.id}|${activeTab}|${gallerySort}`;
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const loading = loadedKey !== queryKey;
+
   useEffect(() => {
     if (!user) return;
-    setLoading(true);
-    loadGallery(1, activeTab === 'favorites').finally(() => setLoading(false));
-  }, [activeTab, loadGallery, user]);
+    // Ignore a response that arrives after the tab/order changed again
+    let active = true;
+    getGenerationHistory(1, PAGE_SIZE, activeTab === 'favorites', gallerySort)
+      .then((data) => {
+        if (!active) return;
+        setImages(data.items);
+        setHasMore(data.has_more);
+        setTotal(data.total);
+        setPage(1);
+        setError(null);
+      })
+      .catch((err) => {
+        if (!active) return;
+        if (err instanceof AuthRequiredError) setSessionExpired(true);
+        else setError(t('gallery.loadError'));
+      })
+      .finally(() => {
+        if (active) setLoadedKey(queryKey);
+      });
+    return () => {
+      active = false;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- t only changes with the language
+  }, [user, activeTab, gallerySort, queryKey]);
 
   const handleLoadMore = async () => {
     setLoadingMore(true);

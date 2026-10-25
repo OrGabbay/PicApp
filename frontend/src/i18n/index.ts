@@ -20,7 +20,8 @@ export const LANGUAGE_NAMES: Record<Language, string> = {
 type Vars = Record<string, string | number>;
 
 export function translate(language: Language, key: MessageKey, vars?: Vars): string {
-  const text = DICTIONARIES[language]?.[key] ?? en[key];
+  // Fall back to English, then to the key itself, so UI text is never blank
+  const text = DICTIONARIES[language]?.[key] ?? en[key] ?? key;
   return vars ? text.replace(/\{(\w+)\}/g, (match, name) => String(vars[name] ?? match)) : text;
 }
 
@@ -51,6 +52,7 @@ const SERVER_MESSAGES: Record<string, MessageKey> = {
   'Invalid or expired token': 'common.sessionExpired',
   'Cannot connect to the backend. Check that it is running.': 'common.backendOffline',
   'Login failed. Check that the backend is running.': 'common.backendOffline',
+  'Too many requests. Please wait and try again.': 'common.tooManyRequests',
 };
 
 export function translateServerMessage(language: Language, message: string): string {
@@ -62,7 +64,8 @@ export function translateServerMessage(language: Language, message: string): str
 export function describeKeyIssue(
   language: Language,
   issue: { code?: string | null; provider?: string | null; fallback?: string | null; message?: string | null },
-  context: 'generate' | 'enhance',
+  /** 'reason' = only why the key failed (no "used the free engine instead" sentence) */
+  context: 'generate' | 'enhance' | 'reason',
 ): string | null {
   const reasonKey = `keyIssue.${issue.code}` as MessageKey;
   if (!issue.code || !(reasonKey in en)) {
@@ -70,6 +73,7 @@ export function describeKeyIssue(
     return issue.message ?? null;
   }
   const reason = translate(language, reasonKey, { provider: issue.provider || 'AI' });
+  if (context === 'reason') return reason;
   const fallbackKey: MessageKey =
     context === 'enhance' ? 'keyIssue.fallbackEnhance'
     : issue.fallback === 'partial' ? 'keyIssue.fallbackPartial'
